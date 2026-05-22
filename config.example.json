@@ -1,0 +1,41 @@
+{
+    "user": {
+        "name": "Your Name"
+    },
+    "allowed_apps": [
+        {
+            "name": "App Name",
+            "path": "/Applications/YourApp.app"
+        }
+    ],
+    "features": {
+        "voice": false,
+        "weather": true,
+        "news": true,
+        "stocks": true,
+        "calendar": true,
+        "reminders": true,
+        "spotify": true,
+        "screen_capture": false,
+        "notes": true,
+        "startup_briefing": true
+    },
+    "stocks": {
+        "watchlist": ["AAPL", "NVDA", "MSFT"]
+    },
+    "news": {
+        "rss_feeds": [
+            "https://feeds.bbci.co.uk/news/rss.xml",
+            "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml"
+        ],
+        "max_headlines": 5
+    },
+    "weather": {
+        "location": "Your City"
+    },
+    "hotkey": "<ctrl>+<space>",
+    "openai": {
+        "model": "gpt-4o",
+        "api_key": "YOUR_OPENAI_API_KEY"
+    }
+}

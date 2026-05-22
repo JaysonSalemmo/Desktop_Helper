@@ -1,0 +1,49 @@
+{
+    "user": {
+        "name": "Kai"
+    },
+    "allowed_apps": [
+        {
+            "name": "League Client",
+            "path": "/Applications/League of Legends.app"
+        },
+        {
+            "name": "Spotify",
+            "path": "/Applications/Spotify.app"
+        },
+        {
+            "name": "VS Code",
+            "path": "/Applications/Visual Studio Code.app"
+        }
+    ],
+    "features": {
+        "voice": false,
+        "weather": true,
+        "news": true,
+        "stocks": true,
+        "calendar": true,
+        "reminders": true,
+        "spotify": true,
+        "screen_capture": false,
+        "notes": true,
+        "startup_briefing": true
+    },
+    "stocks": {
+        "watchlist": ["AAPL", "NVDA", "MSFT"]
+    },
+    "news": {
+        "rss_feeds": [
+            "https://feeds.bbci.co.uk/news/rss.xml",
+            "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml"
+        ],
+        "max_headlines": 5
+    },
+    "weather": {
+        "location": "New York"
+    },
+    "hotkey": "<ctrl>+<space>",
+    "openai": {
+        "model": "gpt-4o",
+        "api_key": ""
+    }
+}
