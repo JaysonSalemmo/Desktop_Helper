@@ -7,3 +7,8 @@ PLAN.md
 DEVLOG.md
 data/
 model/checkpoints/
+*.pt
+*.bin
+*.safetensors
+logs/
+wandb/
