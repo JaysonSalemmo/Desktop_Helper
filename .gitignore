@@ -4,3 +4,6 @@ __pycache__/
 .env
 .DS_Store
 PLAN.md
+DEVLOG.md
+data/
+model/checkpoints/
