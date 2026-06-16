@@ -177,10 +177,19 @@ class DesktopHelperLM(nn.Module):
         max_new_tokens: int,
         temperature: float = 1.0,
         top_k: int | None = None,
+        eos_id: int | None = None,
     ) -> torch.Tensor:
         # autoregressively sample one token at a time.
         # temperature > 1 = more random, temperature < 1 = more focused.
         # top_k limits sampling to the k most likely tokens at each step.
+        # eos_id, if given, stops generation once every sequence in the batch
+        # has produced it — for batch size 1 (the normal chat case) this just
+        # means "stop as soon as the model says it's done".
+        #
+        # note: this does not stop on [CALL: tool] tokens. the phase 4 dispatcher
+        # will run its own token-by-token loop so it can pause, run the tool, and
+        # feed the result back in before continuing — this method is for plain
+        # text completion and quick testing.
         for _ in range(max_new_tokens):
             # trim the context window if the sequence has grown too long
             idx_cond = idx[:, -self.config.context_len:]
@@ -197,5 +206,8 @@ class DesktopHelperLM(nn.Module):
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, idx_next), dim=1)
+
+            if eos_id is not None and (idx_next == eos_id).all():
+                break
 
         return idx

@@ -68,9 +68,15 @@ class DesktopHelperTokenizer:
         trainer = BpeTrainer(
             vocab_size=vocab_size,
             special_tokens=SPECIAL_TOKENS,
-            # ignore tokens that appear fewer than twice — reduces noise from typos
+            # ignore merges that appear fewer than twice — reduces noise from typos
             min_frequency=2,
             show_progress=True,
+            # seed every one of the 256 possible byte-level characters into the
+            # vocab up front. without this, any byte that happens not to appear
+            # in the training corpus (e.g. a punctuation mark) never gets a token
+            # and silently falls back to <unk> on encode — defeating the whole
+            # point of byte-level bpe, which is supposed to have zero unknowns.
+            initial_alphabet=ByteLevel.alphabet(),
         )
 
         tokenizer.train([str(f) for f in files], trainer)
