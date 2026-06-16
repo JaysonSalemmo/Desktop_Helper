@@ -37,3 +37,11 @@ class ModelConfig:
     # forces the model to not rely on any single neuron — reduces overfitting.
     # set to 0.0 at inference time automatically.
     dropout: float = 0.1
+
+    @classmethod
+    def from_tokenizer(cls, tokenizer, **overrides) -> "ModelConfig":
+        # build a config whose vocab_size always matches the trained tokenizer.
+        # the tokenizer's vocab_size depends on the training corpus and isn't
+        # guaranteed to land exactly on the requested target, so this is the
+        # only safe way to construct a model that won't have mismatched ids.
+        return cls(vocab_size=tokenizer.vocab_size, **overrides)
