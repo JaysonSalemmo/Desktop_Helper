@@ -26,7 +26,10 @@ def train(args) -> None:
     tokenizer = DesktopHelperTokenizer.load(args.tokenizer)
 
     print("Loading model from checkpoint...")
-    ckpt = torch.load(args.checkpoint, map_location="cpu")
+    # weights_only=False: the checkpoint stores a ModelConfig object, which the
+    # PyTorch 2.6+ default (weights_only=True) refuses to unpickle. Safe here —
+    # this is our own checkpoint produced by model/load_opt.py, not untrusted input.
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     config = ckpt["config"]
     model = DesktopHelperLM(config).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
