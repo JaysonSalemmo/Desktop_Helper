@@ -49,7 +49,24 @@ def train(args) -> None:
     )
     print(f"{len(dataset)} examples, {len(loader)} batches per epoch")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.1)
+    # Split-LR: token_emb/lm_head started from random init (OPT's vocab couldn't
+    # transfer to our custom tokenizer) and must be learned from scratch, so they
+    # get a much higher LR. The transplanted transformer blocks + positional
+    # embeddings are already pre-trained and only need gentle fine-tuning — a high
+    # LR there would wipe out OPT's language knowledge. lm_head.weight is tied to
+    # token_emb.weight (same tensor), so model.parameters() yields it once and the
+    # id() partition below cleanly separates the two groups.
+    embed_params = list(model.token_emb.parameters())
+    embed_ids = {id(p) for p in embed_params}
+    block_params = [p for p in model.parameters() if id(p) not in embed_ids]
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": embed_params, "lr": args.embed_lr},
+            {"params": block_params, "lr": args.lr},
+        ],
+        weight_decay=0.1,
+    )
+    print(f"embedding LR {args.embed_lr:.1e} (from scratch)  |  block LR {args.lr:.1e} (fine-tune)")
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, _warmup_lambda(args.warmup_steps)
     )
@@ -87,7 +104,8 @@ def train(args) -> None:
 
             if global_step % args.log_every == 0:
                 avg = running_loss / args.log_every
-                print(f"epoch {epoch}  step {global_step:>6}  loss {avg:.4f}  lr {scheduler.get_last_lr()[0]:.2e}")
+                embed_lr, block_lr = scheduler.get_last_lr()
+                print(f"epoch {epoch}  step {global_step:>6}  loss {avg:.4f}  emb_lr {embed_lr:.2e}  blk_lr {block_lr:.2e}")
                 running_loss = 0.0
 
             global_step += 1
@@ -120,7 +138,10 @@ def main() -> None:
                         help="per-device batch size (default: 4)")
     parser.add_argument("--grad-accum", type=int, default=8,
                         help="gradient accumulation steps — effective batch = batch_size × grad_accum (default: 8 → effective 32)")
-    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--lr", type=float, default=2e-5,
+                        help="LR for the pre-trained transformer blocks (default: 2e-5)")
+    parser.add_argument("--embed-lr", type=float, default=3e-4,
+                        help="LR for token_emb/lm_head, learned from scratch (default: 3e-4)")
     parser.add_argument("--warmup-steps", type=int, default=100)
     parser.add_argument("--log-every", type=int, default=10,
                         help="print loss every N optimizer steps (default: 10)")
