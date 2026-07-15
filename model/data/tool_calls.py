@@ -245,18 +245,27 @@ _NEWS_HEADLINES = [
     "Tech layoffs continue at major firms",
 ]
 
-# (symbol, prompt) pairs — prompt references the symbol explicitly
+_STOCK_SYMBOLS = [
+    "AAPL", "NVDA", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "AMD", "INTC",
+    "NFLX", "DIS", "BA", "JPM", "V", "WMT", "KO", "PEP", "COST", "PLTR",
+    "UBER", "SHOP", "CRM", "ORCL", "QCOM", "MU",
+]
+
+# templates for symbol-specific prompts — expanded across the full symbol list
+# below so the model learns tool routing generalises to any ticker, not a fixed few
+_STOCK_PROMPT_TEMPLATES = [
+    "How's {s} doing?",
+    "Is {s} up or down?",
+    "What's {s} at?",
+    "What's {s} trading at?",
+    "Check {s} for me.",
+    "How's {s} today?",
+]
+
+# (symbol, prompt) pairs — one prompt per symbol, cycling through templates
 _STOCKS_SPECIFIC = [
-    ("AAPL",  "How's AAPL doing?"),
-    ("AAPL",  "Is AAPL up or down?"),
-    ("NVDA",  "What's NVDA at?"),
-    ("NVDA",  "How's NVDA today?"),
-    ("MSFT",  "Check MSFT for me."),
-    ("MSFT",  "How's MSFT doing?"),
-    ("GOOGL", "What's GOOGL at?"),
-    ("AMZN",  "How's AMZN doing?"),
-    ("TSLA",  "What's TSLA trading at?"),
-    ("META",  "How's META today?"),
+    (sym, _STOCK_PROMPT_TEMPLATES[i % len(_STOCK_PROMPT_TEMPLATES)].format(s=sym))
+    for i, sym in enumerate(_STOCK_SYMBOLS)
 ]
 
 # prompts that don't reference a specific symbol
@@ -268,8 +277,6 @@ _STOCKS_GENERAL_PROMPTS = [
     "What are my stocks doing?",
     "Give me a market update.",
 ]
-
-_STOCK_SYMBOLS = ["AAPL", "NVDA", "MSFT", "GOOGL", "AMZN", "META", "TSLA"]
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +438,7 @@ def generate(count: int, seed: int | None = None) -> list[dict]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate synthetic tool-call training examples")
     parser.add_argument("--output", default="data/tool_calls.jsonl")
-    parser.add_argument("--count", type=int, default=500)
+    parser.add_argument("--count", type=int, default=3000)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 

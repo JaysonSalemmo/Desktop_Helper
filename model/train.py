@@ -138,8 +138,8 @@ def main() -> None:
                         help="per-device batch size (default: 4)")
     parser.add_argument("--grad-accum", type=int, default=8,
                         help="gradient accumulation steps — effective batch = batch_size × grad_accum (default: 8 → effective 32)")
-    parser.add_argument("--lr", type=float, default=2e-5,
-                        help="LR for the pre-trained transformer blocks (default: 2e-5)")
+    parser.add_argument("--lr", type=float, default=5e-5,
+                        help="LR for the pre-trained transformer blocks (default: 5e-5)")
     parser.add_argument("--embed-lr", type=float, default=3e-4,
                         help="LR for token_emb/lm_head, learned from scratch (default: 3e-4)")
     parser.add_argument("--warmup-steps", type=int, default=100)
