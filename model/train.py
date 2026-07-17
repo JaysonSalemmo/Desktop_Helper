@@ -1,8 +1,10 @@
 import argparse
+import math
 from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from model.dataset import InstructDataset
 from model.device import get_device
@@ -10,11 +12,18 @@ from model.tokenizer import DesktopHelperTokenizer
 from model.transformer import DesktopHelperLM
 
 
-def _warmup_lambda(warmup_steps: int):
+def _lr_lambda(warmup_steps: int, total_steps: int, min_ratio: float = 0.1):
+    # linear warmup, then cosine decay from the peak LR down to min_ratio × peak.
+    # decaying the LR (rather than holding it flat) reliably reaches a lower final
+    # loss and generalises better. applied as a multiplier to both param groups,
+    # so the embedding and block LRs decay proportionally together.
     def fn(step: int) -> float:
         if step < warmup_steps:
             return float(step) / float(max(1, warmup_steps))
-        return 1.0
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        progress = min(1.0, progress)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_ratio + (1.0 - min_ratio) * cosine
     return fn
 
 
@@ -67,13 +76,22 @@ def train(args) -> None:
         weight_decay=0.1,
     )
     print(f"embedding LR {args.embed_lr:.1e} (from scratch)  |  block LR {args.lr:.1e} (fine-tune)")
+    # total optimizer steps drive the cosine decay horizon
+    steps_per_epoch = len(loader) // args.grad_accum
+    total_steps = args.epochs * steps_per_epoch
     scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, _warmup_lambda(args.warmup_steps)
+        optimizer, _lr_lambda(args.warmup_steps, total_steps)
     )
     scaler = torch.cuda.amp.GradScaler()
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # TensorBoard: writes live loss/LR curves to logdir (default <output>/runs).
+    # Point Colab's %tensorboard at this dir to watch training in real time.
+    logdir = args.logdir or str(out_dir / "runs")
+    writer = SummaryWriter(log_dir=logdir)
+    print(f"TensorBoard logs → {logdir}")
 
     global_step = 0
     model.train()
@@ -105,6 +123,9 @@ def train(args) -> None:
             if global_step % args.log_every == 0:
                 avg = running_loss / args.log_every
                 embed_lr, block_lr = scheduler.get_last_lr()
+                writer.add_scalar("loss/train", avg, global_step)
+                writer.add_scalar("lr/embed", embed_lr, global_step)
+                writer.add_scalar("lr/block", block_lr, global_step)
                 print(f"epoch {epoch}  step {global_step:>6}  loss {avg:.4f}  emb_lr {embed_lr:.2e}  blk_lr {block_lr:.2e}")
                 running_loss = 0.0
 
@@ -120,6 +141,8 @@ def train(args) -> None:
         }, ckpt_path)
         print(f"Saved → {ckpt_path}")
 
+    writer.close()
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -133,6 +156,8 @@ def main() -> None:
                         help="path to tool-call JSONL (default: data/tool_calls.jsonl)")
     parser.add_argument("--output", default="model/checkpoints/finetune",
                         help="directory to save per-epoch checkpoints")
+    parser.add_argument("--logdir", default=None,
+                        help="TensorBoard log directory (default: <output>/runs)")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=4,
                         help="per-device batch size (default: 4)")
