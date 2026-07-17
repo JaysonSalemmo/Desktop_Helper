@@ -35,6 +35,6 @@
     },
     "hotkey": "<ctrl>+<space>",
     "model": {
-        "checkpoint": "model/checkpoints/latest.pt"
+        "checkpoint": "model/checkpoints/epoch_08.pt"
     }
 }
