@@ -69,6 +69,65 @@ def test_no_tool_call_returns_plain_text():
     assert len(result.response) > 0
 
 
+class AfterCallModel:
+    """Emits the given call token first, then fixed logits forever after."""
+
+    def __init__(self, call_id: int, vocab_size: int, later: dict[int, float],
+                 context_len: int = 1024):
+        self.call_id = call_id
+        self.vocab_size = vocab_size
+        self.later = later  # token id → logit; everything else 0
+        self.first = True
+        self.config = SimpleNamespace(context_len=context_len)
+
+    def eval(self):
+        return self
+
+    def __call__(self, idx):
+        logits = torch.zeros((1, idx.shape[1], self.vocab_size))
+        if self.first:
+            logits[0, -1, :] = -10.0
+            logits[0, -1, self.call_id] = 10.0
+            self.first = False
+        else:
+            for tok_id, value in self.later.items():
+                logits[0, -1, tok_id] = value
+        return logits, None
+
+
+def test_reply_after_tool_is_deterministic():
+    # near-tied logits would flip under temperature sampling; post-tool decoding
+    # must be greedy, so every run picks the same (higher) token
+    tok = _tokenizer()
+    a, b = tok.encode("alpha")[0], tok.encode("beta")[0]
+
+    responses = set()
+    for _ in range(5):
+        model = AfterCallModel(tok.tool_token_id("weather"), tok.vocab_size,
+                               later={a: 0.6, b: 0.5})
+        d = ToolDispatcher(model, tok, {"weather": lambda m: "72°F, sunny"},
+                           device=torch.device("cpu"), max_new_tokens=5, copy_boost=0.0)
+        responses.add(d.respond("weather?").response)
+    assert len(responses) == 1
+
+
+def test_copy_bias_pulls_reply_tokens_from_result():
+    # flat logits after the call: without the copy boost any token could win;
+    # with it, generation can only emit tokens from the injected result
+    tok = _tokenizer()
+    result_text = "Bohemian Rhapsody by Queen"
+    model = AfterCallModel(tok.tool_token_id("spotify"), tok.vocab_size, later={})
+    d = ToolDispatcher(model, tok, {"spotify": lambda m: result_text},
+                       device=torch.device("cpu"), max_new_tokens=6)
+
+    response = d.respond("what's playing?").response
+    # argmax over flat+boost picks the lowest boosted id each step; the
+    # repetition penalty then knocks it below the rest, so generation walks
+    # the boosted ids in ascending order
+    expected_ids = sorted(set(tok.encode(result_text)))[:5]
+    assert response == tok.decode(expected_ids, skip_special=True).strip()
+
+
 def test_unregistered_tool_falls_back_gracefully():
     tok = _tokenizer()
     script = [tok.tool_token_id("weather"), tok.eos_id]

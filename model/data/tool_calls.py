@@ -1,3 +1,20 @@
+"""
+Synthetic tool-call training data.
+
+Faithfulness redesign (2026-07-17): result content is generated compositionally
+(random names, invented proper nouns, course codes, arbitrary numbers/times) so
+it almost never repeats across examples. With the old small fixed pools the
+model could reach low loss by memorising pool items instead of reading the
+[RESULT] block — which is exactly the unfaithful behaviour observed at
+inference. High-entropy content makes copying from context the only low-loss
+strategy. Replies echo result content *verbatim* (no case changes) to maximise
+the copy signal.
+
+Result string *formats* are a contract with src/assistant/tools.py — the real
+handlers emit these exact shapes, including the fallback strings ("Calendar
+access not granted", "X is disabled in config"), which are trained here too so
+the model wraps real failure modes gracefully.
+"""
 import argparse
 import json
 import random
@@ -5,7 +22,7 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# Data pools
+# Prompt pools (routing signal — unchanged from the 8/8-routing run)
 # ---------------------------------------------------------------------------
 
 _CALENDAR_PROMPTS = [
@@ -45,24 +62,6 @@ _CALENDAR_PROMPTS = [
     "What have I got on today?",
 ]
 
-_CALENDAR_EVENTS = [
-    "Standup at 9am",
-    "1:1 with manager at 2pm",
-    "Design review at 3pm",
-    "Team lunch at 12pm",
-    "Sprint planning at 10am",
-    "All-hands at 4pm",
-    "Code review at 11am",
-    "Interview at 1pm",
-    "Doctor appointment at 3:30pm",
-    "Dentist at 10:30am",
-    "Retrospective at 9:30am",
-    "Product demo at 2:30pm",
-    "Budget review at 3pm",
-    "Happy hour at 5pm",
-    "Onboarding call at 11am",
-]
-
 _SCREEN_PROMPTS = [
     "What's on my screen?",
     "What is on my screen?",
@@ -90,29 +89,6 @@ _SCREEN_PROMPTS = [
     "Look at my screen and tell me what you see.",
 ]
 
-_SCREEN_RESULTS = [
-    ("VS Code with a Python file open, browser tab with Stack Overflow",
-     "You have VS Code open with a Python file and a Stack Overflow tab in your browser."),
-    ("Terminal with pytest output showing 3 failing tests",
-     "It looks like you're running tests — there are 3 failing tests in your terminal."),
-    ("Slack with several unread messages in the #engineering channel",
-     "You have Slack open with unread messages in #engineering."),
-    ("Chrome with Gmail open, 4 unread emails",
-     "You have Gmail open in Chrome with 4 unread emails."),
-    ("Figma with a UI design file open",
-     "You have a UI design file open in Figma."),
-    ("Zoom meeting in progress, screen sharing active",
-     "You're in a Zoom meeting with screen sharing active."),
-    ("Spotify desktop app open, music paused",
-     "Spotify is open and music is currently paused."),
-    ("Notes app with a shopping list visible",
-     "You have Notes open with what looks like a shopping list."),
-    ("Two terminal windows and a browser with documentation",
-     "You have two terminal windows open and a browser showing documentation."),
-    ("Calendar app showing this week's schedule",
-     "You have your calendar app open showing this week's schedule."),
-]
-
 _REMINDERS_PROMPTS = [
     "What are my reminders?",
     "What are my reminders for today?",
@@ -138,24 +114,6 @@ _REMINDERS_PROMPTS = [
     "What am I supposed to do today?",
 ]
 
-_REMINDERS_ITEMS = [
-    "Call dentist",
-    "Buy groceries",
-    "Submit timesheet",
-    "Call mom",
-    "Pay rent",
-    "Pick up dry cleaning",
-    "Reply to Sarah's email",
-    "Book flight for conference",
-    "Renew gym membership",
-    "Take medication at 8pm",
-    "Water the plants",
-    "Back up laptop",
-    "Schedule car service",
-    "Send invoice to client",
-    "Review pull request from Jake",
-]
-
 _NOTES_PROMPTS = [
     "What did I note today?",
     "What did I write in my notes?",
@@ -178,23 +136,6 @@ _NOTES_PROMPTS = [
     "What did I jot down?",
     "Go through my notes.",
     "What notes did I take today?",
-]
-
-_NOTES_CONTENT = [
-    ("Meeting notes: discussed Q3 roadmap, action item — update the backlog",
-     "Your notes have a record of a meeting about the Q3 roadmap. Action item: update the backlog."),
-    ("Ideas for the new feature: dark mode toggle, keyboard shortcuts, export to PDF",
-     "You jotted down some feature ideas: dark mode toggle, keyboard shortcuts, and export to PDF."),
-    ("Grocery list: milk, eggs, bread, coffee, apples",
-     "Your notes have a grocery list: milk, eggs, bread, coffee, and apples."),
-    ("Passwords note: do not forget to rotate API keys before Friday",
-     "You have a note reminding you to rotate API keys before Friday."),
-    ("Book recommendations from James: Atomic Habits, The Pragmatic Programmer",
-     "You noted some book recommendations from James: Atomic Habits and The Pragmatic Programmer."),
-    ("Bug investigation: race condition in the auth middleware, repros under high load",
-     "There's a note about a bug — a race condition in the auth middleware that repros under high load."),
-    ("No notes for today",
-     "You haven't written anything in your notes yet today."),
 ]
 
 _SPOTIFY_PROMPTS = [
@@ -228,23 +169,6 @@ _SPOTIFY_PROMPTS = [
     "What am I listening to?",
 ]
 
-_SPOTIFY_TRACKS = [
-    ("Bohemian Rhapsody", "Queen"),
-    ("Hotel California", "Eagles"),
-    ("Stairway to Heaven", "Led Zeppelin"),
-    ("Smells Like Teen Spirit", "Nirvana"),
-    ("Lose Yourself", "Eminem"),
-    ("Blinding Lights", "The Weeknd"),
-    ("Shape of You", "Ed Sheeran"),
-    ("Levitating", "Dua Lipa"),
-    ("As It Was", "Harry Styles"),
-    ("Anti-Hero", "Taylor Swift"),
-    ("Flowers", "Miley Cyrus"),
-    ("Watermelon Sugar", "Harry Styles"),
-]
-
-# launcher prompts are generated per-app from templates so phrasing varies while
-# the app name (the thing that must route correctly) stays prominent
 _LAUNCHER_TEMPLATES = [
     "Open {a}.",
     "Launch {a}.",
@@ -254,27 +178,6 @@ _LAUNCHER_TEMPLATES = [
     "Open up {a} for me.",
     "Get {a} open.",
     "Bring up {a}.",
-]
-
-_LAUNCHER_APPS = [
-    ("Chrome", "Chrome is open."),
-    ("Slack", "Slack is now open."),
-    ("Calculator", "Calculator is open."),
-    ("Figma", "Figma is open."),
-    ("Finder", "Finder is open."),
-    ("VS Code", "VS Code is open."),
-    ("Safari", "Safari is open."),
-    ("Spotify", "Spotify is open."),
-    ("Terminal", "Terminal is open."),
-    ("Notion", "Notion is open."),
-    ("Xcode", "Xcode is open."),
-    ("Discord", "Discord is open."),
-    ("Mail", "Mail is open."),
-    ("Photos", "Photos is open."),
-    ("Messages", "Messages is open."),
-    ("Preview", "Preview is open."),
-    ("Zoom", "Zoom is open."),
-    ("Notes", "Notes is open."),
 ]
 
 _WEATHER_PROMPTS = [
@@ -304,19 +207,6 @@ _WEATHER_PROMPTS = [
     "Give me the weather.",
 ]
 
-_WEATHER_CONDITIONS = [
-    (72, "sunny", False),
-    (65, "partly cloudy", False),
-    (58, "windy", False),
-    (80, "hot and humid", False),
-    (55, "overcast", True),
-    (62, "light rain", True),
-    (45, "cold and clear", False),
-    (70, "mild and breezy", False),
-    (88, "very hot", False),
-    (50, "foggy", True),
-]
-
 _NEWS_PROMPTS = [
     "What's in the news?",
     "What is in the news today?",
@@ -342,32 +232,6 @@ _NEWS_PROMPTS = [
     "Update me on the news.",
 ]
 
-_NEWS_HEADLINES = [
-    "Fed holds interest rates steady amid inflation concerns",
-    "Apple announces new MacBook lineup at WWDC",
-    "Scientists report breakthrough in battery technology",
-    "Global markets rally on strong jobs report",
-    "New climate agreement signed by 40 nations",
-    "OpenAI releases new model with improved reasoning",
-    "Google updates search with AI-powered summaries",
-    "Electric vehicle sales hit record high in Q1",
-    "SpaceX launches next Starlink batch successfully",
-    "Major cybersecurity breach affects thousands of accounts",
-    "Housing market shows signs of cooling",
-    "Nvidia reports record quarterly revenue",
-    "Remote work trends stabilising at hybrid model",
-    "New study links screen time to sleep disruption",
-    "Tech layoffs continue at major firms",
-]
-
-_STOCK_SYMBOLS = [
-    "AAPL", "NVDA", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "AMD", "INTC",
-    "NFLX", "DIS", "BA", "JPM", "V", "WMT", "KO", "PEP", "COST", "PLTR",
-    "UBER", "SHOP", "CRM", "ORCL", "QCOM", "MU",
-]
-
-# templates for symbol-specific prompts — expanded across the full symbol list
-# below so the model learns tool routing generalises to any ticker, not a fixed few
 _STOCK_PROMPT_TEMPLATES = [
     "How's {s} doing?",
     "Is {s} up or down?",
@@ -377,13 +241,6 @@ _STOCK_PROMPT_TEMPLATES = [
     "How's {s} today?",
 ]
 
-# (symbol, prompt) pairs — one prompt per symbol, cycling through templates
-_STOCKS_SPECIFIC = [
-    (sym, _STOCK_PROMPT_TEMPLATES[i % len(_STOCK_PROMPT_TEMPLATES)].format(s=sym))
-    for i, sym in enumerate(_STOCK_SYMBOLS)
-]
-
-# prompts that don't reference a specific symbol
 _STOCKS_GENERAL_PROMPTS = [
     "Check my watchlist.",
     "Is the market up today?",
@@ -395,118 +252,366 @@ _STOCKS_GENERAL_PROMPTS = [
 
 
 # ---------------------------------------------------------------------------
+# High-entropy content generators
+# ---------------------------------------------------------------------------
+
+_FIRST_NAMES = [
+    "Sarah", "Jake", "Tessa", "Marcus", "Priya", "Daniel", "Ines", "Tom",
+    "Amara", "Leo", "Nadia", "Chris", "Yuki", "Omar", "Elena", "Sam",
+    "Ravi", "Clara", "Diego", "Maja", "Felix", "Aisha", "Ben", "Lena",
+    "Kofi", "Rosa", "Ethan", "Zara", "Noah", "Ida", "Mateo", "June",
+    "Anders", "Bilal", "Greta", "Hana", "Ivan", "Joelle", "Kai", "Luca",
+]
+
+_LAST_NAMES = [
+    "Okafor", "Lindqvist", "Marchetti", "Novak", "Reyes", "Tanaka",
+    "Osei", "Bergstrom", "Kaur", "Delgado", "Fischer", "Haddad",
+    "Ivanova", "Johansson", "Kimura", "Laurent", "Moreau", "Nakamura",
+    "Oduya", "Petrov", "Quintana", "Rossi", "Sato", "Thorne",
+    "Ueda", "Vasquez", "Weber", "Xu", "Yilmaz", "Zhang",
+]
+
+_SYLLABLES = [
+    "ka", "ro", "ven", "tal", "mir", "zo", "len", "dar", "fi", "nex",
+    "bel", "tur", "sa", "gri", "pol", "dun", "cha", "vor", "li", "mak",
+    "os", "quin", "ther", "ul", "brin", "cor", "del", "fen", "gal", "hyr",
+]
+
+_NOUNS = [
+    "budget", "insurance", "groceries", "laptop", "roadmap", "invoice",
+    "passport", "timesheet", "onboarding", "retro", "sprint", "design",
+    "marketing", "hiring", "security", "billing", "backlog", "pricing",
+    "launch", "audit", "contract", "renewal", "prototype", "pipeline",
+    "migration", "rollout", "offsite", "training", "survey", "handoff",
+    "dashboard", "cleanup", "release", "quarterly", "compliance", "vendor",
+]
+
+_DEPTS = ["CS", "BME", "SSW", "EE", "MA", "PHYS", "BIO", "CHE", "HUM", "MGT"]
+
+_REAL_APPS = [
+    "Chrome", "Slack", "Calculator", "Figma", "Finder", "VS Code", "Safari",
+    "Spotify", "Terminal", "Notion", "Xcode", "Discord", "Mail", "Photos",
+    "Messages", "Preview", "Zoom", "Notes", "Obsidian", "Calendar",
+]
+
+_REAL_TICKERS = [
+    "AAPL", "NVDA", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "AMD", "INTC",
+    "NFLX", "DIS", "BA", "JPM", "V", "WMT", "KO", "PEP", "COST", "PLTR",
+    "UBER", "SHOP", "CRM", "ORCL", "QCOM", "MU",
+]
+
+# must match src/weather/weather.py's condition vocabulary exactly
+_WEATHER_CONDITIONS = [
+    "sunny", "partly cloudy", "overcast", "foggy", "light rain", "rainy",
+    "heavy rain", "freezing rain", "snowy", "stormy", "unsettled",
+]
+
+_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def _name() -> str:
+    if random.random() < 0.5:
+        return f"{random.choice(_FIRST_NAMES)} {random.choice(_LAST_NAMES)}"
+    return random.choice(_FIRST_NAMES)
+
+
+def _pword() -> str:
+    """Invented proper noun ("Venkaro") — can only be produced by copying."""
+    n = random.randint(2, 3)
+    return "".join(random.choice(_SYLLABLES) for _ in range(n)).capitalize()
+
+
+def _noun() -> str:
+    return random.choice(_NOUNS)
+
+
+def _course() -> str:
+    sep = random.choice(["", " "])
+    return f"{random.choice(_DEPTS)}{sep}{random.randint(100, 799)}"
+
+
+def _time() -> str:
+    hour = random.randint(1, 12)
+    suffix = random.choice(["am", "pm"])
+    if random.random() < 0.5:
+        return f"{hour}{suffix}"
+    return f"{hour}:{random.choice([5, 10, 15, 20, 30, 40, 45, 50]):02d}{suffix}"
+
+
+def _app() -> str:
+    return random.choice(_REAL_APPS) if random.random() < 0.7 else _pword()
+
+
+def _ticker() -> str:
+    if random.random() < 0.6:
+        return random.choice(_REAL_TICKERS)
+    return "".join(random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ") for _ in range(random.randint(2, 5)))
+
+
+def _join(items: list[str]) -> str:
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+
+def _wrap(tool: str, result: str, reply: str, prompt: str) -> tuple[str, str]:
+    return prompt, f"[CALL: {tool}][RESULT]{result}[/RESULT]\n{reply}"
+
+
+def _disabled(tool: str, prompt: str) -> tuple[str, str]:
+    return _wrap(tool, f"{tool} is disabled in config",
+                 f"The {tool} tool is disabled in your config.", prompt)
+
+
+# ---------------------------------------------------------------------------
 # Per-tool example builders
 # ---------------------------------------------------------------------------
 
+def _event_title() -> str:
+    return random.choice([
+        lambda: f"1:1 with {_name()}",
+        lambda: f"Lunch with {_name()}",
+        lambda: f"Call with {_name()}",
+        lambda: f"{_noun().capitalize()} review",
+        lambda: f"{_noun().capitalize()} sync",
+        lambda: f"{_noun().capitalize()} planning",
+        lambda: f"{_pword()} demo",
+        lambda: f"{_course()} lecture",
+        lambda: f"{_course()} office hours",
+        lambda: f"Interview with {_name()}",
+        lambda: f"Dentist",
+        lambda: f"Doctor appointment",
+        lambda: f"{_pword()} kickoff",
+        lambda: f"Gym with {_name()}",
+    ])()
+
+
 def _calendar() -> tuple[str, str]:
     prompt = random.choice(_CALENDAR_PROMPTS)
-    n = random.randint(0, 3)
-    if n == 0:
-        result = "No events today"
-        reply = "Your calendar is clear today."
-    else:
-        events = random.sample(_CALENDAR_EVENTS, n)
-        result = ", ".join(events)
-        if n == 1:
-            reply = f"You have {events[0].lower()} today."
+    roll = random.random()
+    if roll < 0.05:
+        return _wrap("calendar", "Calendar access not granted",
+                     "I can't see your calendar — access hasn't been granted yet.", prompt)
+    if roll < 0.15:
+        return _wrap("calendar", "No events today", "Your calendar is clear today.", prompt)
+
+    entries = []
+    for _ in range(random.randint(1, 3)):
+        title = _event_title()
+        if random.random() < 0.15:
+            entries.append(f"{title} (all day)")
         else:
-            head = ", ".join(e.lower() for e in events[:-1])
-            reply = f"You have {head}, and {events[-1].lower()} today."
-    return prompt, f"[CALL: calendar][RESULT]{result}[/RESULT]\n{reply}"
+            entries.append(f"{title} at {_time()}")
+    result = ", ".join(entries)
+    reply = random.choice([
+        f"You have {_join(entries)} today.",
+        f"Today: {_join(entries)}.",
+        f"On your calendar: {_join(entries)}.",
+    ])
+    return _wrap("calendar", result, reply, prompt)
 
 
 def _screen() -> tuple[str, str]:
     prompt = random.choice(_SCREEN_PROMPTS)
-    result_text, reply = random.choice(_SCREEN_RESULTS)
-    return prompt, f"[CALL: screen][RESULT]{result_text}[/RESULT]\n{reply}"
+    if random.random() < 0.03:
+        return _disabled("screen", prompt)
+
+    front = _app()
+    others = random.sample([a for a in _REAL_APPS if a != front], random.randint(0, 4))
+    if random.random() < 0.3:
+        others.append(_pword())
+    random.shuffle(others)
+
+    if not others:
+        result = f"{front} in front"
+        reply = random.choice([
+            f"{front} is the only app in front right now.",
+            f"You're in {front}.",
+        ])
+    else:
+        result = f"{front} in front, also open: {', '.join(others)}"
+        reply = random.choice([
+            f"You're in {front}, with {_join(others)} open.",
+            f"{front} is in front; {_join(others)} are also open.",
+            f"Right now {front} is in front, and you also have {_join(others)} open.",
+        ])
+    return _wrap("screen", result, reply, prompt)
+
+
+def _task() -> str:
+    return random.choice([
+        lambda: f"Call {_name()}",
+        lambda: f"Email {_name()}",
+        lambda: f"Pay {_noun()} bill",
+        lambda: f"Submit {_noun()} report",
+        lambda: f"Buy {_noun()}",
+        lambda: f"Renew {_noun()}",
+        lambda: f"Book {_noun()} appointment",
+        lambda: f"Pick up {_noun()}",
+        lambda: f"{_course()} homework",
+        lambda: f"{_course()} Final Exam",
+        lambda: f"Review pull request from {_name()}",
+        lambda: f"Get {_noun()} checked",
+        lambda: f"Bring {_noun()} just in case",
+        lambda: f"{_pword()} - {_noun()} follow-up",
+    ])()
 
 
 def _reminders() -> tuple[str, str]:
     prompt = random.choice(_REMINDERS_PROMPTS)
-    n = random.randint(0, 4)
-    if n == 0:
-        result = "No reminders set"
-        reply = "You don't have any reminders set right now."
+    roll = random.random()
+    if roll < 0.05:
+        return _wrap("reminders", "Reminders access not granted",
+                     "I can't see your reminders — access hasn't been granted yet.", prompt)
+    if roll < 0.15:
+        return _wrap("reminders", "No reminders set",
+                     "You don't have any reminders set right now.", prompt)
+
+    items = [_task() for _ in range(random.randint(1, 4))]
+    result = ", ".join(items)
+    if len(items) == 1:
+        reply = f"You have one reminder: {items[0]}."
     else:
-        items = random.sample(_REMINDERS_ITEMS, n)
-        result = ", ".join(items)
-        if n == 1:
-            reply = f"You have one reminder: {items[0].lower()}."
-        else:
-            head = ", ".join(i.lower() for i in items[:-1])
-            reply = f"You have {n} reminders: {head}, and {items[-1].lower()}."
-    return prompt, f"[CALL: reminders][RESULT]{result}[/RESULT]\n{reply}"
+        reply = random.choice([
+            f"You have {len(items)} reminders: {_join(items)}.",
+            f"On your list: {_join(items)}.",
+        ])
+    return _wrap("reminders", result, reply, prompt)
 
 
 def _notes() -> tuple[str, str]:
     prompt = random.choice(_NOTES_PROMPTS)
-    result_text, reply = random.choice(_NOTES_CONTENT)
-    return prompt, f"[CALL: notes][RESULT]{result_text}[/RESULT]\n{reply}"
+    if random.random() < 0.15:
+        return _wrap("notes", "No notes for today",
+                     "You haven't written anything in your notes yet today.", prompt)
+
+    content = random.choice([
+        lambda: f"{_noun().capitalize()} ideas: {_noun()}, {_noun()}, {_noun()}",
+        lambda: f"Meeting with {_name()}: action item — {_task()}",
+        lambda: f"{_course()} exam on {random.choice(_DAYS)} — review {_noun()}",
+        lambda: f"Grocery list: {_noun()}, {_noun()}, {_noun()}",
+        lambda: f"Don't forget: {_task()} before {random.choice(_DAYS)}",
+        lambda: f"Bug: {_pword()} fails when {_noun()} is empty",
+        lambda: f"Book recommendation from {_name()}: {_pword()}",
+    ])()
+    reply = random.choice([
+        f"Your notes say: {content}.",
+        f"You wrote down: {content}.",
+        f"From your notes today: {content}.",
+    ])
+    return _wrap("notes", content, reply, prompt)
+
+
+def _track() -> tuple[str, str]:
+    title = random.choice([
+        lambda: f"{_pword()} {_noun().capitalize()}",
+        lambda: f"{_noun().capitalize()} {_noun().capitalize()}",
+        lambda: _pword(),
+    ])()
+    artist = random.choice([
+        lambda: _name(),
+        lambda: f"The {_pword()}s",
+        lambda: _pword(),
+    ])()
+    return title, artist
 
 
 def _spotify() -> tuple[str, str]:
     prompt = random.choice(_SPOTIFY_PROMPTS)
+    if random.random() < 0.03:
+        return _disabled("spotify", prompt)
+
     action = random.choice(["status", "pause", "skip", "volume_up", "volume_down"])
-    track, artist = random.choice(_SPOTIFY_TRACKS)
-    vol = random.randint(3, 10) * 10
+    title, artist = _track()
+    vol = random.randint(4, 100)
 
     if action == "status":
-        result = f"{track} by {artist}, volume {vol}%"
-        reply = f"{track} by {artist} is playing at {vol}% volume."
+        result = f"{title} by {artist}, volume {vol}%"
+        reply = f"{title} by {artist} is playing at {vol}% volume."
     elif action == "pause":
         result = "Paused"
         reply = "Music paused."
     elif action == "skip":
-        next_track, next_artist = random.choice(_SPOTIFY_TRACKS)
-        result = f"Now playing: {next_track} by {next_artist}"
-        reply = f"Skipped — now playing {next_track} by {next_artist}."
+        result = f"Now playing: {title} by {artist}"
+        reply = f"Skipped — now playing {title} by {artist}."
     elif action == "volume_up":
         result = f"Volume set to {vol}%"
         reply = f"Volume turned up to {vol}%."
     else:
         result = f"Volume set to {vol}%"
         reply = f"Volume turned down to {vol}%."
-
-    return prompt, f"[CALL: spotify][RESULT]{result}[/RESULT]\n{reply}"
+    return _wrap("spotify", result, reply, prompt)
 
 
 def _launcher() -> tuple[str, str]:
-    app, reply = random.choice(_LAUNCHER_APPS)
+    app = _app()
     prompt = random.choice(_LAUNCHER_TEMPLATES).format(a=app)
-    result = f"{app} launched"
-    return prompt, f"[CALL: launcher][RESULT]{result}[/RESULT]\n{reply}"
+    if random.random() < 0.1:
+        return _wrap("launcher", "No matching app in the allowed apps list",
+                     f"I couldn't find {app} in your allowed apps list.", prompt)
+    return _wrap("launcher", f"{app} launched", f"{app} is open.", prompt)
 
 
 def _weather() -> tuple[str, str]:
     prompt = random.choice(_WEATHER_PROMPTS)
-    temp, condition, raining = random.choice(_WEATHER_CONDITIONS)
+    roll = random.random()
+    if roll < 0.03:
+        return _disabled("weather", prompt)
+    if roll < 0.06:
+        loc = _pword()
+        return _wrap("weather", f"weather error: location not found: {loc}",
+                     f"I couldn't look up the weather for {loc}.", prompt)
+
+    temp = random.randint(5, 105)
+    condition = random.choice(_WEATHER_CONDITIONS)
     result = f"{temp}°F, {condition}"
-
-    if raining:
+    if "rain" in condition or condition in ("stormy", "snowy"):
         reply = f"It's {temp}°F and {condition} — you might want an umbrella."
-    elif temp < 55:
+    elif temp < 50:
         reply = f"It's {temp}°F and {condition} — a jacket is a good idea."
-    elif temp > 80:
-        reply = f"It's {temp}°F and {condition} out today."
     else:
-        reply = f"It's {temp}°F and {condition} outside."
+        reply = random.choice([
+            f"It's {temp}°F and {condition} outside.",
+            f"Currently {temp}°F and {condition}.",
+        ])
+    return _wrap("weather", result, reply, prompt)
 
-    return prompt, f"[CALL: weather][RESULT]{result}[/RESULT]\n{reply}"
+
+def _company() -> str:
+    return _pword() + random.choice(["", " Labs", " Systems", "Corp", " Tech"])
+
+
+def _headline() -> str:
+    return random.choice([
+        lambda: f"{_company()} announces new {_noun()} {random.choice(['platform', 'service', 'tool'])}",
+        lambda: f"{_company()} shares {random.choice(['rise', 'fall'])} {round(random.uniform(1, 12), 1)}% after {_noun()} report",
+        lambda: f"{_name()} named CEO of {_company()}",
+        lambda: f"Scientists report {_noun()} breakthrough at {_pword()} University",
+        lambda: f"{_pword()} City approves new {_noun()} plan",
+        lambda: f"{_company()} recalls {_noun()} product over safety concerns",
+        lambda: f"{_company()} to cut {random.randint(2, 90) * 100} jobs in {_noun()} shakeup",
+        lambda: f"New study links {_noun()} to {_noun()} risks",
+    ])()
 
 
 def _news() -> tuple[str, str]:
     prompt = random.choice(_NEWS_PROMPTS)
-    n = random.randint(2, 4)
-    headlines = random.sample(_NEWS_HEADLINES, n)
+    if random.random() < 0.05:
+        return _wrap("news", "No headlines available right now",
+                     "I couldn't fetch any headlines right now.", prompt)
+
+    headlines = [_headline() for _ in range(random.randint(2, 4))]
     result = "; ".join(headlines)
-    items = "; ".join(h.lower() for h in headlines)
-    reply = f"Here are today's top stories: {items}."
-    return prompt, f"[CALL: news][RESULT]{result}[/RESULT]\n{reply}"
+    reply = random.choice([
+        f"Here are today's top stories: {'; '.join(headlines)}.",
+        f"In the news: {'; '.join(headlines)}.",
+    ])
+    return _wrap("news", result, reply, prompt)
 
 
 def _stock_entry(sym: str) -> tuple[str, str]:
-    price = round(random.uniform(80, 900), 2)
-    change = round(random.uniform(-3.5, 3.5), 1)
+    price = round(random.uniform(2, 1500), 2)
+    change = round(random.uniform(-6, 6), 1)
     direction = "+" if change >= 0 else ""
     trend = "up" if change >= 0 else "down"
     return f"{sym}: ${price} ({direction}{change}%)", f"{sym} is {trend} {abs(change)}% at ${price}"
@@ -514,17 +619,19 @@ def _stock_entry(sym: str) -> tuple[str, str]:
 
 def _stocks() -> tuple[str, str]:
     if random.random() < 0.5:
-        # specific-symbol prompt — result must reference that symbol
-        sym, prompt = random.choice(_STOCKS_SPECIFIC)
+        sym = _ticker()
+        prompt = random.choice(_STOCK_PROMPT_TEMPLATES).format(s=sym)
+        if random.random() < 0.05:
+            return _wrap("stocks", f"{sym}: no data",
+                         f"I couldn't get data for {sym}.", prompt)
         result, reply = _stock_entry(sym)
     else:
-        # general prompt — show 1-3 random symbols from watchlist
         prompt = random.choice(_STOCKS_GENERAL_PROMPTS)
-        symbols = random.sample(_STOCK_SYMBOLS, random.randint(1, 3))
+        symbols = [_ticker() for _ in range(random.randint(1, 3))]
         entries, parts = zip(*[_stock_entry(s) for s in symbols])
         result = ", ".join(entries)
         reply = "; ".join(parts) + "."
-    return prompt, f"[CALL: stocks][RESULT]{result}[/RESULT]\n{reply}"
+    return _wrap("stocks", result, reply, prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +656,7 @@ def generate(count: int, seed: int | None = None) -> list[dict]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate synthetic tool-call training examples")
     parser.add_argument("--output", default="data/tool_calls.jsonl")
-    parser.add_argument("--count", type=int, default=3000)
+    parser.add_argument("--count", type=int, default=4000)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 

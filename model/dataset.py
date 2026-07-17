@@ -9,6 +9,30 @@ from datasets import load_dataset
 from model.tokenizer import DesktopHelperTokenizer
 
 
+def result_span_mask(ids: list[int], result_start_id: int, result_end_id: int) -> list[bool]:
+    """Target-position mask (True = exclude from loss) covering every
+    [RESULT]...[/RESULT] block, delimiters included.
+
+    At inference the dispatcher injects the real result — the model never
+    generates those tokens, so training loss on them only teaches it to
+    *invent* results (the unfaithfulness bug). Loss stays ON for the
+    [CALL: tool] token (routing) and the reply after [/RESULT].
+
+    Targets are shifted: y[k] predicts ids[k+1], so token ids[j] is masked at
+    index j-1.
+    """
+    mask = [False] * (len(ids) - 1)
+    inside = False
+    for j, tok in enumerate(ids):
+        if tok == result_start_id:
+            inside = True
+        if inside and j >= 1:
+            mask[j - 1] = True
+        if tok == result_end_id:
+            inside = False
+    return mask
+
+
 class InstructDataset(Dataset):
     def __init__(
         self,
@@ -45,6 +69,7 @@ class InstructDataset(Dataset):
         # whose limited capacity shouldn't be spent modelling prompt phrasings.
         self.sequences: list[torch.Tensor] = []
         self.prompt_lens: list[int] = []
+        self.result_masks: list[torch.Tensor] = []
         target_len = context_len + 1
         for ex in examples:
             prompt_ids = [tokenizer.bos_id] + tokenizer.encode(f"{ex['prompt']}\n")
@@ -56,6 +81,13 @@ class InstructDataset(Dataset):
                 ids = ids + [self._pad_id] * (target_len - len(ids))
             self.sequences.append(torch.tensor(ids, dtype=torch.long))
             self.prompt_lens.append(min(len(prompt_ids), target_len))
+            # mask [RESULT]...[/RESULT] out of the loss — the dispatcher
+            # injects real results at inference; training on fabricated ones
+            # teaches exactly the unfaithful behaviour we intercept
+            self.result_masks.append(torch.tensor(
+                result_span_mask(ids, tokenizer.result_start_id, tokenizer.result_end_id),
+                dtype=torch.bool,
+            ))
 
     def __len__(self) -> int:
         return len(self.sequences)
@@ -70,5 +102,6 @@ class InstructDataset(Dataset):
         # still learns to start the response from the prompt.
         n_mask = max(0, self.prompt_lens[idx] - 1)
         y[:n_mask] = -100
+        y[self.result_masks[idx]] = -100  # never learn to generate result blocks
         y[y == self._pad_id] = -100  # cross_entropy ignores -100 by default
         return x, y
