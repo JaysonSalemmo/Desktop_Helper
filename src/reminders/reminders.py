@@ -1,29 +1,41 @@
 """
-macOS Reminders integration via pyobjc EventKit.
-Shares the same framework as calendar_integration.
+macOS Reminders via the shared EventKit store (src/eventkit/store.py).
+
+Result string matches the training format: "Call dentist, Buy groceries" or
+"No reminders set".
 """
+import threading
 
-# TODO: implement using EventKit via pyobjc
-# EventKit handles both Calendar and Reminders on macOS.
-#
-# Pattern:
-#   from EventKit import EKEventStore, EKReminderPriority
-#   store = EKEventStore.alloc().init()
-#   store.requestAccessToEntityType_completion_(EKEntityTypeReminder, callback)
-#
-# Will require user to grant Reminders permission on first run (macOS prompt).
+from EventKit import EKEntityTypeReminder
+
+from src.eventkit.store import request_access
+
+FETCH_TIMEOUT = 15
 
 
-def get_incomplete() -> list[dict]:
-    """Return all incomplete reminders."""
-    raise NotImplementedError("Reminders integration not yet implemented.")
+def format_reminders(titles: list[str]) -> str:
+    return ", ".join(titles) if titles else "No reminders set"
 
 
-def add(title: str, due_date=None) -> None:
-    """Create a new reminder."""
-    raise NotImplementedError("Reminders integration not yet implemented.")
+def get_incomplete() -> list[str]:
+    """Titles of all incomplete reminders, across all reminder lists."""
+    store = request_access(EKEntityTypeReminder)
+    predicate = store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
+        None, None, None
+    )
+
+    done = threading.Event()
+    found: list[str] = []
+
+    def callback(reminders):
+        found.extend(str(r.title()) for r in (reminders or []) if r.title())
+        done.set()
+
+    store.fetchRemindersMatchingPredicate_completion_(predicate, callback)
+    if not done.wait(timeout=FETCH_TIMEOUT):
+        raise TimeoutError("Reminders fetch timed out")
+    return found
 
 
-def complete(title: str) -> None:
-    """Mark a reminder as complete by title."""
-    raise NotImplementedError("Reminders integration not yet implemented.")
+def incomplete_summary() -> str:
+    return format_reminders(get_incomplete())

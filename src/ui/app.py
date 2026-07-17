@@ -10,7 +10,7 @@ from model.device import get_device
 from model.generate import load_model
 from model.tokenizer import DesktopHelperTokenizer
 from src.assistant.dispatcher import ToolDispatcher
-from src.assistant.tools import HANDLERS
+from src.assistant.tools import build_handlers
 from src.config import settings
 
 TOKENIZER_PATH = "model/tokenizer.json"
@@ -70,7 +70,7 @@ class DesktopHelperApp(App):
             device = get_device(require_cuda=False)
             tokenizer = DesktopHelperTokenizer.load(TOKENIZER_PATH)
             model = load_model(str(checkpoint), device)
-            dispatcher = ToolDispatcher(model, tokenizer, HANDLERS, device)
+            dispatcher = ToolDispatcher(model, tokenizer, build_handlers(self.config), device)
         except Exception as exc:
             self.call_from_thread(
                 log.write, f"[bold red]Failed to load model:[/bold red] {escape(str(exc))}"
