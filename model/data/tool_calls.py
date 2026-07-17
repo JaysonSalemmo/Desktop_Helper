@@ -10,17 +10,39 @@ from pathlib import Path
 
 _CALENDAR_PROMPTS = [
     "What's on my calendar today?",
+    "What is on my calendar today?",
+    "What's on my calendar?",
     "What do I have scheduled today?",
+    "What do I have scheduled?",
     "Any meetings today?",
+    "Do I have any meetings today?",
     "What are my events for today?",
+    "What events do I have today?",
     "What's my schedule look like?",
+    "What is my schedule for today?",
+    "What does my day look like?",
     "Do I have anything on today?",
+    "Do I have anything scheduled?",
     "What meetings do I have?",
+    "What meetings are coming up?",
     "Check my calendar.",
+    "Check my calendar for today.",
+    "Pull up my calendar.",
+    "Look at my calendar.",
     "What's coming up today?",
+    "What's next on my calendar?",
     "Am I busy today?",
+    "Am I free this afternoon?",
+    "Do I have time this morning?",
     "What's on my agenda?",
+    "What is on my agenda today?",
+    "Show me my agenda.",
     "Any appointments today?",
+    "Do I have any appointments?",
+    "When's my next meeting?",
+    "What's my first meeting today?",
+    "Is my afternoon booked?",
+    "What have I got on today?",
 ]
 
 _CALENDAR_EVENTS = [
@@ -43,13 +65,29 @@ _CALENDAR_EVENTS = [
 
 _SCREEN_PROMPTS = [
     "What's on my screen?",
+    "What is on my screen?",
+    "What's on my screen right now?",
     "What am I looking at?",
+    "What am I looking at on screen?",
     "Describe my screen.",
+    "Describe what's on my screen.",
+    "Take a screenshot and describe it.",
     "What's currently on my display?",
+    "What is displayed on my screen?",
     "What am I working on?",
+    "What am I working on right now?",
     "Can you see my screen?",
+    "Can you look at my screen?",
     "What's open on my computer?",
+    "What apps are open on my screen?",
     "What does my screen show?",
+    "What's shown on my display?",
+    "Read my screen.",
+    "What windows do I have open?",
+    "Capture my screen.",
+    "Tell me what's on my screen.",
+    "What's up on my monitor?",
+    "Look at my screen and tell me what you see.",
 ]
 
 _SCREEN_RESULTS = [
@@ -77,13 +115,27 @@ _SCREEN_RESULTS = [
 
 _REMINDERS_PROMPTS = [
     "What are my reminders?",
+    "What are my reminders for today?",
     "What do I need to remember today?",
+    "What do I need to remember?",
     "Check my reminders.",
+    "Check my reminders for today.",
     "Any reminders for today?",
+    "Do I have any reminders today?",
     "What's on my reminder list?",
+    "What is on my reminders list?",
     "Do I have any reminders set?",
+    "Are there any reminders set?",
     "Show me my reminders.",
+    "Pull up my reminders.",
+    "List my reminders.",
     "What should I not forget today?",
+    "What do I have to do today?",
+    "What's on my to-do list?",
+    "What tasks do I have?",
+    "Remind me what I need to do.",
+    "Do I have anything to take care of?",
+    "What am I supposed to do today?",
 ]
 
 _REMINDERS_ITEMS = [
@@ -106,13 +158,26 @@ _REMINDERS_ITEMS = [
 
 _NOTES_PROMPTS = [
     "What did I note today?",
+    "What did I write in my notes?",
     "Check my notes.",
+    "Check my notes for today.",
     "What's in my notes?",
+    "What is in my notes?",
     "Show me today's notes.",
+    "Show me my notes.",
     "Did I write anything down?",
+    "Did I make any notes today?",
     "What are my notes?",
+    "What notes do I have?",
     "Pull up my notes.",
+    "Open my notes.",
+    "Read my notes.",
     "What have I noted recently?",
+    "What have I written down?",
+    "Anything in my notes?",
+    "What did I jot down?",
+    "Go through my notes.",
+    "What notes did I take today?",
 ]
 
 _NOTES_CONTENT = [
@@ -134,15 +199,33 @@ _NOTES_CONTENT = [
 
 _SPOTIFY_PROMPTS = [
     "What's playing?",
+    "What's playing on Spotify?",
+    "What is playing right now?",
     "What song is this?",
-    "What's on?",
+    "What song is playing?",
+    "What track is this?",
     "Pause the music.",
+    "Pause Spotify.",
+    "Pause the song.",
     "Skip this song.",
+    "Skip this track.",
+    "Next song.",
+    "Play the next track.",
     "Turn up the volume.",
+    "Turn the music up.",
     "Turn down the volume.",
+    "Turn the music down.",
+    "Lower the volume.",
     "Play something.",
+    "Play some music.",
+    "Resume the music.",
     "What artist is this?",
+    "Who sings this?",
+    "Who is this by?",
     "Stop the music.",
+    "Stop Spotify.",
+    "What's the current song?",
+    "What am I listening to?",
 ]
 
 _SPOTIFY_TRACKS = [
@@ -160,19 +243,17 @@ _SPOTIFY_TRACKS = [
     ("Watermelon Sugar", "Harry Styles"),
 ]
 
-_LAUNCHER_PROMPTS = [
-    "Open Chrome.",
-    "Launch Slack.",
-    "Open the calculator.",
-    "Start Figma.",
-    "Open Finder.",
-    "Launch VS Code.",
-    "Open Safari.",
-    "Start Spotify.",
-    "Open Terminal.",
-    "Launch Notion.",
-    "Open Xcode.",
-    "Start Discord.",
+# launcher prompts are generated per-app from templates so phrasing varies while
+# the app name (the thing that must route correctly) stays prominent
+_LAUNCHER_TEMPLATES = [
+    "Open {a}.",
+    "Launch {a}.",
+    "Start {a}.",
+    "Can you open {a}?",
+    "Fire up {a}.",
+    "Open up {a} for me.",
+    "Get {a} open.",
+    "Bring up {a}.",
 ]
 
 _LAUNCHER_APPS = [
@@ -188,19 +269,39 @@ _LAUNCHER_APPS = [
     ("Notion", "Notion is open."),
     ("Xcode", "Xcode is open."),
     ("Discord", "Discord is open."),
+    ("Mail", "Mail is open."),
+    ("Photos", "Photos is open."),
+    ("Messages", "Messages is open."),
+    ("Preview", "Preview is open."),
+    ("Zoom", "Zoom is open."),
+    ("Notes", "Notes is open."),
 ]
 
 _WEATHER_PROMPTS = [
     "What's the weather like?",
+    "What is the weather like today?",
     "How's the weather today?",
+    "How is the weather outside?",
     "Will it rain today?",
+    "Is it going to rain?",
     "Do I need a jacket?",
+    "Do I need a coat today?",
     "What's the temperature outside?",
+    "What is the temperature right now?",
+    "How warm is it outside?",
     "Is it cold out?",
+    "Is it warm out today?",
     "What's the forecast?",
+    "What is the forecast for today?",
+    "What's the forecast looking like?",
     "Should I bring an umbrella?",
+    "Do I need an umbrella today?",
     "How hot is it today?",
+    "How cold is it out?",
     "What's the weather looking like?",
+    "Is it sunny out?",
+    "What's it like outside?",
+    "Give me the weather.",
 ]
 
 _WEATHER_CONDITIONS = [
@@ -218,13 +319,27 @@ _WEATHER_CONDITIONS = [
 
 _NEWS_PROMPTS = [
     "What's in the news?",
+    "What is in the news today?",
     "Any news today?",
+    "Is there any news?",
     "What's happening in the world?",
+    "What is happening in the world today?",
     "Give me the headlines.",
+    "Give me today's headlines.",
     "What are the top stories?",
+    "What are the top headlines?",
     "Any tech news?",
+    "Any news in tech today?",
     "What's going on today?",
+    "What's going on in the news?",
     "Catch me up on the news.",
+    "Catch me up on today's news.",
+    "Show me the news.",
+    "Read me the headlines.",
+    "What's the latest news?",
+    "Any breaking news?",
+    "What stories are trending?",
+    "Update me on the news.",
 ]
 
 _NEWS_HEADLINES = [
@@ -357,11 +472,7 @@ def _spotify() -> tuple[str, str]:
 
 def _launcher() -> tuple[str, str]:
     app, reply = random.choice(_LAUNCHER_APPS)
-    # match the prompt to the app so examples are coherent
-    prompt = next(
-        (p for p in _LAUNCHER_PROMPTS if app.lower() in p.lower()),
-        f"Open {app}.",
-    )
+    prompt = random.choice(_LAUNCHER_TEMPLATES).format(a=app)
     result = f"{app} launched"
     return prompt, f"[CALL: launcher][RESULT]{result}[/RESULT]\n{reply}"
 
