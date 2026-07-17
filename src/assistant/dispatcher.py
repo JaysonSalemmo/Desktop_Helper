@@ -53,7 +53,9 @@ class ToolDispatcher:
         max_new_tokens: int = 120,
         temperature: float = 0.7,
         top_k: int | None = 40,
-        copy_boost: float = 2.0,
+        copy_boost: float = 4.0,  # swept 2026-07-17 on run-3 epoch_08: metric keeps
+                                  # rising past 8 but replies degrade into token salad
+                                  # (Goodhart) — 4 is the fluency/faithfulness balance
         repetition_penalty: float = 1.3,
     ):
         self.model = model.eval()
