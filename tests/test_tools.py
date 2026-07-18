@@ -143,6 +143,27 @@ def test_spotify_specific_song_without_creds_degrades(monkeypatch):
     assert "API keys" in reply
 
 
+def test_extract_location():
+    from src.assistant.tools import extract_location
+
+    assert extract_location("How is the weather today in New York?") == "New York"
+    assert extract_location("What's the weather in Tokyo") == "Tokyo"
+    assert extract_location("forecast for San Francisco?") == "San Francisco"
+    assert extract_location("Is it cold out in the morning?") is None
+    assert extract_location("What's the weather like?") is None
+
+
+def test_fallback_router_covers_weather_and_spotify():
+    from src.assistant.tools import build_fallback_router
+
+    fallback = build_fallback_router()
+    assert fallback("How is the weather today in New York?") == "weather"
+    assert fallback("What's the temperature outside right now?") == "weather"
+    assert fallback("Play Passionfruit by Drake on Spotify") == "spotify"
+    assert fallback("Hello there!") is None
+    assert fallback("Tell me a joke") is None
+
+
 def test_verbatim_replies_template_and_passthrough():
     from src.assistant.tools import build_verbatim
 

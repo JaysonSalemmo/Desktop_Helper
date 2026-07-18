@@ -42,6 +42,7 @@ INFO_PLIST = {
     "LSMinimumSystemVersion": "13.0",
     # menu bar app: no Dock icon, no app switcher entry
     "LSUIElement": True,
+    "CFBundleIconFile": "AppIcon",
     # never let LaunchServices translate the launcher under Rosetta (it did —
     # bash ran x86_64, breaking rubicon-objc's arch detection downstream)
     "LSArchitecturePriority": ["arm64"],
@@ -90,6 +91,12 @@ def build(output_dir: Path) -> Path:
     launcher = macos_dir / "DesktopHelper"
     launcher.write_text(LAUNCHER.format(project=PROJECT_ROOT, uv=uv, log=LOG_PATH))
     launcher.chmod(launcher.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    icon = PROJECT_ROOT / "assets" / "AppIcon.icns"
+    if icon.exists():  # generate with scripts/make_icon.py
+        resources = app / "Contents" / "Resources"
+        resources.mkdir()
+        shutil.copy(icon, resources / "AppIcon.icns")
 
     # ad-hoc signature keeps the TCC grant stable across rebuilds; best-effort
     subprocess.run(["codesign", "--force", "--sign", "-", str(app)],

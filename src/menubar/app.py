@@ -25,11 +25,13 @@ Title doubles as a status indicator: ⏳ loading → ◆ ready → 🎤 listenin
 import threading
 
 import rumps
-from AppKit import NSApplication
+from AppKit import NSApplication, NSImage
 from PyObjCTools import AppHelper
 
-from src.assistant.engine import load_engine
+from src.assistant.engine import PROJECT_ROOT, load_engine
 from src.config import settings
+
+ICON_PATH = PROJECT_ROOT / "assets" / "AppIcon.icns"
 
 TITLE_LOADING = "⏳"
 TITLE_READY = "◆"
@@ -40,6 +42,12 @@ TITLE_LISTENING = "🎤"
 class DesktopHelperMenuBar(rumps.App):
     def __init__(self):
         super().__init__("Desktop Helper", title=TITLE_LOADING, quit_button="Quit")
+        # our icon on dialogs instead of the Python rocket (the process is
+        # python, so NSApp otherwise inherits python's icon)
+        if ICON_PATH.exists():
+            icon = NSImage.alloc().initWithContentsOfFile_(str(ICON_PATH))
+            if icon:
+                NSApplication.sharedApplication().setApplicationIconImage_(icon)
         self.config = settings.load()
         self.dispatcher = None
         self.busy = False
@@ -59,11 +67,16 @@ class DesktopHelperMenuBar(rumps.App):
         if self.voice_enabled:
             self.speak_item = rumps.MenuItem("Speak", callback=self._toggle_voice)
             menu.append(self.speak_item)
+        self.briefing_item = rumps.MenuItem("Morning Briefing", callback=self._briefing_clicked)
+        menu.append(self.briefing_item)
         self.menu = [*menu, None, self.status_item]
 
         self._hotkeys = None
         self._start_hotkey()  # before the load thread — _load_model reads _hotkeys
         threading.Thread(target=self._load_model, daemon=True).start()
+        if self.config.get("features", {}).get("startup_briefing", False):
+            # briefing needs no model — deliver as a notification while it loads
+            threading.Thread(target=self._startup_briefing, daemon=True).start()
 
     # -- startup ------------------------------------------------------------
 
@@ -122,6 +135,30 @@ class DesktopHelperMenuBar(rumps.App):
         self.busy = True
         self.title = TITLE_THINKING
         threading.Thread(target=self._respond, args=(message,), daemon=True).start()
+
+    # -- briefing ------------------------------------------------------------
+
+    def _briefing_clicked(self, _sender) -> None:
+        threading.Thread(target=self._show_briefing, daemon=True).start()
+
+    def _startup_briefing(self) -> None:
+        # alert, not a notification: NSUserNotification from our launcher-style
+        # process "succeeds" without visibly delivering (no registered bundle).
+        # Revisit notifications if the app ever becomes a real py2app freeze.
+        self._show_briefing()
+
+    def _show_briefing(self) -> None:
+        """Worker thread: compose (network + EventKit) then show the alert."""
+        from src.briefing import briefing
+        try:
+            text = briefing.compose(self.config)
+        except Exception as exc:
+            text = f"Briefing failed: {exc}"
+        AppHelper.callAfter(self._show_alert, "Morning Briefing", text)
+
+    def _show_alert(self, title: str, body: str) -> None:
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        rumps.alert(title=title, message=body)
 
     # -- voice flow ----------------------------------------------------------
 
@@ -185,8 +222,7 @@ class DesktopHelperMenuBar(rumps.App):
         self.busy = False
         self.title = TITLE_READY
         self.status_item.title = getattr(self, "_ready_status", "Ready")
-        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-        rumps.alert(title=message, message=body)
+        self._show_alert(message, body)
 
 
 def main() -> None:
