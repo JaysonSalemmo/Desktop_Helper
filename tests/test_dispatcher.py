@@ -159,6 +159,54 @@ def test_non_verbatim_tool_still_generates():
     assert model.i > 1  # generation continued past the tool call
 
 
+class WeakToolModel:
+    """First step mildly prefers a tool token (low softmax prob), then spikes eos."""
+
+    def __init__(self, tool_id: int, text_id: int, eos_id: int, vocab_size: int):
+        self.tool_id, self.text_id, self.eos_id = tool_id, text_id, eos_id
+        self.vocab_size = vocab_size
+        self.step = 0
+        self.config = SimpleNamespace(context_len=1024)
+
+    def eval(self):
+        return self
+
+    def __call__(self, idx):
+        logits = torch.zeros((1, idx.shape[1], self.vocab_size))
+        if self.step == 0:
+            logits[0, -1, self.tool_id] = 1.0   # top, but prob ≈ tiny over 32k vocab
+            logits[0, -1, self.text_id] = 0.5
+        else:
+            logits[0, -1, self.eos_id] = 10.0
+        self.step += 1
+        return logits, None
+
+
+def test_low_confidence_tool_call_becomes_chat():
+    tok = _tokenizer()
+    word = tok.encode("hello")[0]
+    model = WeakToolModel(tok.tool_token_id("spotify"), word, tok.eos_id, tok.vocab_size)
+    calls = []
+    d = ToolDispatcher(model, tok, {"spotify": lambda m: calls.append(m) or "x"},
+                       device=torch.device("cpu"), top_k=1)
+
+    result = d.respond("Hello.")
+    assert result.tool is None       # gated — no tool call accepted
+    assert calls == []               # handler never ran
+    # reply is the decoded text token (a single BPE piece of "hello")
+    assert result.response == tok.decode([word], skip_special=True).strip()
+
+
+def test_confident_tool_call_passes_the_gate():
+    tok = _tokenizer()
+    # ScriptedModel spikes the tool logit at +10 vs -10 → prob ≈ 1
+    script = [tok.tool_token_id("weather"), tok.eos_id]
+    model = ScriptedModel(script, tok.vocab_size)
+    d = ToolDispatcher(model, tok, {"weather": lambda m: "72°F, sunny"},
+                       device=torch.device("cpu"), top_k=1)
+    assert d.respond("What's the weather?").tool == "weather"
+
+
 def test_fallback_router_rescues_unrouted_messages():
     tok = _tokenizer()
     word = tok.encode("hello")[0]

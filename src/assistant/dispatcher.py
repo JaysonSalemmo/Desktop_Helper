@@ -60,6 +60,7 @@ class ToolDispatcher:
         repetition_penalty: float = 1.3,
         verbatim: "dict[str, Callable[[str], str]] | None" = None,
         fallback_router: "Callable[[str], str | None] | None" = None,
+        route_confidence: float = 0.9,
     ):
         self.model = model.eval()
         self.tok = tokenizer
@@ -79,14 +80,30 @@ class ToolDispatcher:
         # phrasings outside the training distribution ("Play X on Spotify"
         # produced gibberish chat instead of routing)
         self.fallback_router = fallback_router
+        # a tool call is only accepted if the model is at least this sure.
+        # Measured on epoch_16: genuine tool prompts route at p≈1.000, chat
+        # tops out at p≈0.68 ("Hello." wanted spotify at p=0.13) — 0.9 splits
+        # them cleanly. Below the gate, tool tokens are masked and the turn
+        # becomes plain chat.
+        self.route_confidence = route_confidence
+        self._tool_ids = {i for i in range(100)
+                          if tokenizer.is_tool_call(i) is not None}
 
     def _next_token(self, seq: list[int], greedy: bool = False,
                     boost_ids: set[int] | None = None,
-                    penalize_ids: set[int] | None = None) -> int:
+                    penalize_ids: set[int] | None = None,
+                    gate_tools: bool = False) -> int:
         context = seq[-self.model.config.context_len:]
         idx = torch.tensor([context], dtype=torch.long, device=self.device)
         logits, _ = self.model(idx)
         logits = logits[0, -1, :]
+        if gate_tools:
+            top = int(torch.argmax(logits))
+            if self.tok.is_tool_call(top) is not None:
+                prob = F.softmax(logits.float(), dim=-1)[top]
+                if prob < self.route_confidence:
+                    # not confident it's a tool request — treat as chat
+                    logits[list(self._tool_ids)] = float("-inf")
         if boost_ids and self.copy_boost:
             # only boost result tokens not yet copied into the reply — a boosted
             # token that keeps its boost after emission out-muscles the repetition
@@ -134,7 +151,8 @@ class ToolDispatcher:
             # flaky on marginal phrasings). Post-injection stays greedy too;
             # sampling only shapes the middle of no-tool chat replies.
             next_id = self._next_token(seq, greedy=step == 0 or tool_used is not None,
-                                       boost_ids=result_ids, penalize_ids=reply_ids)
+                                       boost_ids=result_ids, penalize_ids=reply_ids,
+                                       gate_tools=step == 0)
             tool = self.tok.is_tool_call(next_id)
 
             if tool is not None and tool_used is None:

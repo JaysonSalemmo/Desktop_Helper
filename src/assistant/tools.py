@@ -13,6 +13,7 @@ faithfully than novel ones.
 backend and respects the feature flags in config.json (a disabled tool still
 responds, but says it's disabled).
 """
+import re
 from collections.abc import Callable
 
 from src.launcher import launcher
@@ -161,7 +162,8 @@ def build_handlers(config: dict) -> dict[str, Handler]:
         return launcher.launch(app)
 
     def weather_handler(message: str) -> str:
-        return weather.current(config["weather"]["location"])
+        location = extract_location(message) or config["weather"]["location"]
+        return weather.current(location)
 
     def news_handler(message: str) -> str:
         found = news.headlines(
@@ -267,8 +269,21 @@ def build_fallback_router() -> Handler:
         # gibberish chat instead of a tool call
         if extract_play_query(message) is not None or "spotify" in lower:
             return "spotify"
+        # "How is the weather in New York?" — naming a location makes the
+        # model treat it as a general question (argmax = text, no call)
+        if "weather" in lower or "forecast" in lower or "temperature" in lower:
+            return "weather"
         return None
     return fallback
+
+
+# "in/for {Capitalized Place}" — capitalization keeps "in the morning" out
+_LOCATION_RE = re.compile(r"\b(?:in|for) ([A-Z][\w.'-]*(?: [A-Z][\w.'-]*)*)")
+
+
+def extract_location(message: str) -> str | None:
+    match = _LOCATION_RE.search(message)
+    return match.group(1).rstrip("?!.") if match else None
 
 
 def build_verbatim() -> dict[str, Handler]:
