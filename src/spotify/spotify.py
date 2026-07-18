@@ -6,6 +6,7 @@ The Web API is used only for search (text → track URI), which works with the
 client-credentials flow: just the app id/secret from config, no OAuth login.
 """
 import base64
+import random
 import subprocess
 import time
 
@@ -99,19 +100,33 @@ def _api_token(client_id: str, client_secret: str) -> str:
     return _token["value"]
 
 
-def search_track(query: str, client_id: str, client_secret: str) -> tuple[str, str] | None:
-    """Top search hit for the query → (track URI, "Title by Artist"), or None."""
+def _search(query: str, limit: int, client_id: str, client_secret: str) -> list[dict]:
     token = _api_token(client_id, client_secret)
     resp = requests.get(
         SEARCH_URL,
-        params={"q": query, "type": "track", "limit": 1},
+        params={"q": query, "type": "track", "limit": limit},
         headers={"Authorization": f"Bearer {token}"},
         timeout=API_TIMEOUT,
     )
     resp.raise_for_status()
-    items = resp.json().get("tracks", {}).get("items", [])
-    if not items:
-        return None
-    track = items[0]
+    return resp.json().get("tracks", {}).get("items", [])
+
+
+def _describe(track: dict) -> tuple[str, str]:
     artists = ", ".join(a["name"] for a in track["artists"])
     return track["uri"], f"{track['name']} by {artists}"
+
+
+def search_track(query: str, client_id: str, client_secret: str) -> tuple[str, str] | None:
+    """Top search hit for the query → (track URI, "Title by Artist"), or None."""
+    items = _search(query, 1, client_id, client_secret)
+    return _describe(items[0]) if items else None
+
+
+def search_artist_track(artist: str, client_id: str, client_secret: str) -> tuple[str, str] | None:
+    """A *random* track by the artist — for vague requests ("a song by Drake"),
+    where a deterministic top hit would play the same song forever.
+
+    limit=10 is the max this API tier allows ("Invalid limit" above that)."""
+    items = _search(f'artist:"{artist}"', 10, client_id, client_secret)
+    return _describe(random.choice(items)) if items else None

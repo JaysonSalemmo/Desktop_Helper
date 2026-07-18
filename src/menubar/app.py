@@ -25,7 +25,7 @@ Title doubles as a status indicator: ⏳ loading → ◆ ready → 🎤 listenin
 import threading
 
 import rumps
-from AppKit import NSApplication, NSImage
+from AppKit import NSAlert, NSApplication, NSFloatingWindowLevel, NSImage
 from PyObjCTools import AppHelper
 
 from src.assistant.engine import PROJECT_ROOT, load_engine
@@ -54,6 +54,8 @@ class DesktopHelperMenuBar(rumps.App):
         self.hotkey_combo = self.config.get("hotkey", "<ctrl>+<space>")
 
         self.voice_enabled = self.config.get("features", {}).get("voice", False)
+        # speak replies aloud for voice-initiated turns (say what you heard)
+        self.voice_replies = self.config.get("features", {}).get("voice_replies", True)
         self.recorder = None
         self.transcriber = None
         if self.voice_enabled:
@@ -67,6 +69,10 @@ class DesktopHelperMenuBar(rumps.App):
         if self.voice_enabled:
             self.speak_item = rumps.MenuItem("Speak", callback=self._toggle_voice)
             menu.append(self.speak_item)
+            self.voice_replies_item = rumps.MenuItem("Voice Replies",
+                                                     callback=self._toggle_voice_replies)
+            self.voice_replies_item.state = 1 if self.voice_replies else 0
+            menu.append(self.voice_replies_item)
         self.briefing_item = rumps.MenuItem("Morning Briefing", callback=self._briefing_clicked)
         menu.append(self.briefing_item)
         self.menu = [*menu, None, self.status_item]
@@ -121,12 +127,15 @@ class DesktopHelperMenuBar(rumps.App):
             rumps.alert("Desktop Helper", "Still loading the model — one moment.")
             return
 
-        # modal input windows open behind other apps unless we grab focus
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
         window = rumps.Window(
             message="", title="Desktop Helper", default_text="",
             ok="Ask", cancel="Cancel", dimensions=(380, 48),
         )
+        try:
+            self._float_front(window._alert.window())  # rumps internal — best effort
+        except AttributeError:
+            pass
         response = window.run()
         message = response.text.strip()
         if not response.clicked or not message:
@@ -135,6 +144,16 @@ class DesktopHelperMenuBar(rumps.App):
         self.busy = True
         self.title = TITLE_THINKING
         threading.Thread(target=self._respond, args=(message,), daemon=True).start()
+
+    def _toggle_voice_replies(self, sender) -> None:
+        """Menu checkmark toggling spoken replies; persisted to config.json."""
+        self.voice_replies = not self.voice_replies
+        sender.state = 1 if self.voice_replies else 0
+        self.config.setdefault("features", {})["voice_replies"] = self.voice_replies
+        try:
+            settings.save(self.config)
+        except Exception:
+            pass  # toggle still applies for this session
 
     # -- briefing ------------------------------------------------------------
 
@@ -156,9 +175,22 @@ class DesktopHelperMenuBar(rumps.App):
             text = f"Briefing failed: {exc}"
         AppHelper.callAfter(self._show_alert, "Morning Briefing", text)
 
+    @staticmethod
+    def _float_front(ns_window) -> None:
+        """Menu-bar apps can't force activation on modern macOS (alerts open
+        BEHIND the current app, needing a Dock hunt to dismiss) — a floating
+        window level + orderFrontRegardless shows them on top anyway."""
+        ns_window.setLevel_(NSFloatingWindowLevel)
+        ns_window.orderFrontRegardless()
+
     def _show_alert(self, title: str, body: str) -> None:
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-        rumps.alert(title=title, message=body)
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(title)
+        alert.setInformativeText_(body)
+        alert.addButtonWithTitle_("OK")
+        self._float_front(alert.window())
+        alert.runModal()
 
     # -- voice flow ----------------------------------------------------------
 
@@ -199,7 +231,7 @@ class DesktopHelperMenuBar(rumps.App):
             AppHelper.callAfter(self._voice_heard_nothing)
             return
         AppHelper.callAfter(self._set_status, TITLE_THINKING, f"“{text}”")
-        self._respond(text)
+        self._respond(text, spoken=True)
 
     def _voice_heard_nothing(self) -> None:
         self.busy = False
@@ -208,12 +240,16 @@ class DesktopHelperMenuBar(rumps.App):
 
     # -- inference (worker thread) ------------------------------------------
 
-    def _respond(self, message: str) -> None:
+    def _respond(self, message: str, spoken: bool = False) -> None:
         try:
             result = self.dispatcher.respond(message)
             body = result.response
             if result.tool is not None:
                 body += f"\n\n[{result.tool}] {result.tool_result}"
+            if spoken and self.voice_replies:
+                # you talked to it — it talks back (reply only, not the tool line)
+                from src.voice.voice import speak
+                speak(result.response)
         except Exception as exc:
             body = f"Error: {exc}"
         AppHelper.callAfter(self._show_reply, message, body)

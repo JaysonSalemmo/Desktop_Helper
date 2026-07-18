@@ -87,8 +87,13 @@ def spotify_handler(message: str, credentials: dict | None = None) -> str:
     if query is not None:
         if not credentials or not credentials.get("client_id"):
             return "Add Spotify API keys to config.json to play specific songs"
-        found = spotify.search_track(query, credentials["client_id"],
-                                     credentials["client_secret"])
+        artist = extract_artist_request(query)
+        if artist is not None:
+            found = spotify.search_artist_track(artist, credentials["client_id"],
+                                                credentials["client_secret"])
+        else:
+            found = spotify.search_track(query, credentials["client_id"],
+                                         credentials["client_secret"])
         if found is None:
             return f"No Spotify results for {query}"
         uri, display = found
@@ -275,6 +280,19 @@ def build_fallback_router() -> Handler:
             return "weather"
         return None
     return fallback
+
+
+# vague "…{something generic} by {artist}" — asks for *an* artist song, not a
+# specific track; "Passionfruit by Drake" won't match (non-generic lead)
+_ARTIST_REQUEST_RE = re.compile(
+    r"^(?:a song|a track|something|some music|music|songs|anything)\s+by\s+(.+)$",
+    re.IGNORECASE,
+)
+
+
+def extract_artist_request(query: str) -> str | None:
+    match = _ARTIST_REQUEST_RE.match(query.strip())
+    return match.group(1).strip() if match else None
 
 
 # "in/for {Capitalized Place}" — capitalization keeps "in the morning" out

@@ -10,6 +10,7 @@
     ],
     "features": {
         "voice": false,
+        "voice_replies": true,
         "weather": true,
         "news": true,
         "stocks": true,
