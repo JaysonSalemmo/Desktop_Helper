@@ -53,9 +53,10 @@ class ToolDispatcher:
         max_new_tokens: int = 120,
         temperature: float = 0.7,
         top_k: int | None = 40,
-        copy_boost: float = 4.0,  # swept 2026-07-17 on run-3 epoch_08: metric keeps
-                                  # rising past 8 but replies degrade into token salad
-                                  # (Goodhart) — 4 is the fluency/faithfulness balance
+        copy_boost: float = 8.0,  # re-sweep per checkpoint — the optimum rises as the
+                                  # copy circuit strengthens (run-3 epoch_08 → 4,
+                                  # run-4 epoch_12 → 8 under the decaying scheme).
+                                  # Higher scores the eval but degrades glue (Goodhart).
         repetition_penalty: float = 1.3,
     ):
         self.model = model.eval()
@@ -76,7 +77,12 @@ class ToolDispatcher:
         logits, _ = self.model(idx)
         logits = logits[0, -1, :]
         if boost_ids and self.copy_boost:
-            logits[list(boost_ids)] += self.copy_boost
+            # only boost result tokens not yet copied into the reply — a boosted
+            # token that keeps its boost after emission out-muscles the repetition
+            # penalty and loops ("granted granted granted...")
+            remaining = boost_ids - penalize_ids if penalize_ids else boost_ids
+            if remaining:
+                logits[list(remaining)] += self.copy_boost
         if penalize_ids and self.repetition_penalty != 1.0:
             for tok_id in penalize_ids:
                 if logits[tok_id] > 0:
