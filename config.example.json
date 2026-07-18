@@ -11,6 +11,7 @@
     "features": {
         "voice": false,
         "voice_replies": true,
+        "wake_word": false,
         "weather": true,
         "news": true,
         "stocks": true,
@@ -39,6 +40,11 @@
         "client_secret": "YOUR_SPOTIFY_CLIENT_SECRET"
     },
     "hotkey": "<ctrl>+<space>",
+    "keybinds": {
+        "speak": "<ctrl>+<option>+<space>",
+        "ask": "<ctrl>+<shift>+<space>",
+        "briefing": ""
+    },
     "model": {
         "checkpoint": "model/checkpoints/epoch_08.pt"
     }
