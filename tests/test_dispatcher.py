@@ -159,6 +159,28 @@ def test_non_verbatim_tool_still_generates():
     assert model.i > 1  # generation continued past the tool call
 
 
+def test_fallback_router_rescues_unrouted_messages():
+    tok = _tokenizer()
+    word = tok.encode("hello")[0]
+    model = ScriptedModel([word, tok.eos_id], tok.vocab_size)  # no tool call
+    d = ToolDispatcher(
+        model, tok, {"spotify": lambda m: "Now playing: Passionfruit by Drake"},
+        device=torch.device("cpu"), top_k=1,
+        verbatim={"spotify": lambda r: r},
+        fallback_router=lambda m: "spotify" if "play" in m.lower() else None,
+    )
+
+    result = d.respond("Play Passionfruit by Drake on Spotify")
+    assert result.tool == "spotify"
+    assert result.response == "Now playing: Passionfruit by Drake"
+
+    # non-play chat stays plain text
+    model2 = ScriptedModel([word, tok.eos_id], tok.vocab_size)
+    d.model = model2.eval()
+    result = d.respond("hello there")
+    assert result.tool is None
+
+
 def test_unregistered_tool_falls_back_gracefully():
     tok = _tokenizer()
     script = [tok.tool_token_id("weather"), tok.eos_id]

@@ -59,6 +59,7 @@ class ToolDispatcher:
                                   # Higher scores the eval but degrades glue (Goodhart).
         repetition_penalty: float = 1.3,
         verbatim: "dict[str, Callable[[str], str]] | None" = None,
+        fallback_router: "Callable[[str], str | None] | None" = None,
     ):
         self.model = model.eval()
         self.tok = tokenizer
@@ -74,6 +75,10 @@ class ToolDispatcher:
         # a 350M paraphrase garbles proper nouns. The model still does the
         # routing; it just doesn't get to rewrite the facts.
         self.verbatim = verbatim or {}
+        # consulted only when the model emits NO tool call — safety net for
+        # phrasings outside the training distribution ("Play X on Spotify"
+        # produced gibberish chat instead of routing)
+        self.fallback_router = fallback_router
 
     def _next_token(self, seq: list[int], greedy: bool = False,
                     boost_ids: set[int] | None = None,
@@ -123,10 +128,12 @@ class ToolDispatcher:
         result_ids: set[int] = set()  # injected result tokens → copy-bias targets
         reply_ids: set[int] = set()   # reply tokens so far → repetition-penalty targets
 
-        for _ in range(self.max_new_tokens):
-            # post-injection the reply must echo real data, so decode greedily
-            # with the copy bias; sampling is only for the routing/no-tool path
-            next_id = self._next_token(seq, greedy=tool_used is not None,
+        for step in range(self.max_new_tokens):
+            # the first token is the routing decision — greedy, so the same
+            # question always reaches the same tool (sampling made routing
+            # flaky on marginal phrasings). Post-injection stays greedy too;
+            # sampling only shapes the middle of no-tool chat replies.
+            next_id = self._next_token(seq, greedy=step == 0 or tool_used is not None,
                                        boost_ids=result_ids, penalize_ids=reply_ids)
             tool = self.tok.is_tool_call(next_id)
 
@@ -154,6 +161,17 @@ class ToolDispatcher:
             seq.append(next_id)
             if tool_used is not None:
                 reply_ids.add(next_id)
+
+        if tool_used is None and self.fallback_router is not None:
+            tool = self.fallback_router(message)
+            if tool is not None:
+                tool_result = self._run_tool(tool, message)
+                template = self.verbatim.get(tool)
+                # no template → return the raw result; the model already
+                # declined to route, so it doesn't get to wrap this one
+                response = template(tool_result) if template else tool_result
+                return DispatchResult(response=response, tool=tool,
+                                      tool_result=tool_result)
 
         response = self.tok.decode(seq[response_start:], skip_special=True).strip()
         return DispatchResult(response=response, tool=tool_used, tool_result=tool_result)

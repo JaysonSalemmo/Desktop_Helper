@@ -14,7 +14,7 @@ from model.device import get_device
 from model.generate import load_model
 from model.tokenizer import DesktopHelperTokenizer
 from src.assistant.dispatcher import ToolDispatcher
-from src.assistant.tools import build_handlers, build_verbatim
+from src.assistant.tools import build_fallback_router, build_handlers, build_verbatim
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TOKENIZER_PATH = PROJECT_ROOT / "model" / "tokenizer.json"
@@ -41,5 +41,6 @@ def load_engine(config: dict) -> tuple[ToolDispatcher, torch.device]:
     tokenizer = DesktopHelperTokenizer.load(str(TOKENIZER_PATH))
     model = load_model(str(checkpoint), device)
     dispatcher = ToolDispatcher(model, tokenizer, build_handlers(config), device,
-                                verbatim=build_verbatim())
+                                verbatim=build_verbatim(),
+                                fallback_router=build_fallback_router())
     return dispatcher, device

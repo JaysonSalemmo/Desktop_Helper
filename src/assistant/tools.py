@@ -148,13 +148,15 @@ def build_handlers(config: dict) -> dict[str, Handler]:
     """Handler registry keyed by tool name (the value from is_tool_call)."""
 
     def launcher_handler(message: str) -> str:
+        # play-queries win BEFORE app matching: "Play Bohemian Rhapsody on
+        # Spotify" contains the app name "Spotify" and was matching/launching
+        # the app instead of playing the song. The model routes "Play {Name}"
+        # here (trained launcher prompts are "Open/Start {Name}"), so this
+        # handler owns the disambiguation: a play request is a song.
+        if extract_play_query(message) is not None:
+            return spotify_handler(message, config.get("spotify"))
         app = launcher.match_app(message, config.get("allowed_apps", []))
         if app is None:
-            # routing gap: "Play {song}" looks launcher-shaped to the model
-            # (trained launcher prompts are "Open/Start {Name}") — if it's a
-            # play request for something that isn't an app, it's a song
-            if extract_play_query(message) is not None:
-                return spotify_handler(message, config.get("spotify"))
             return "No matching app in the allowed apps list"
         return launcher.launch(app)
 
@@ -252,6 +254,21 @@ def _launcher_reply(result: str) -> str:
         return f"{result[: -len(' launched')]} is open."
     # fallbacks and spotify-delegated replies are already sentences
     return result
+
+
+def build_fallback_router() -> Handler:
+    """Routes messages the model failed to route (no [CALL] emitted at all).
+
+    Deliberately narrow: only patterns we've *seen* the model miss. Broad
+    keyword routing here would defeat the point of learned routing."""
+    def fallback(message: str) -> str | None:
+        lower = message.lower()
+        # "Play {song} on Spotify" — outside training distribution, produced
+        # gibberish chat instead of a tool call
+        if extract_play_query(message) is not None or "spotify" in lower:
+            return "spotify"
+        return None
+    return fallback
 
 
 def build_verbatim() -> dict[str, Handler]:
