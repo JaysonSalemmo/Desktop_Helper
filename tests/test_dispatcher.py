@@ -128,6 +128,37 @@ def test_copy_bias_pulls_reply_tokens_from_result():
     assert response == tok.decode(expected_ids, skip_special=True).strip()
 
 
+def test_verbatim_tool_short_circuits_generation():
+    tok = _tokenizer()
+    # script only contains the call token — if the dispatcher tried to keep
+    # generating, it would emit the call token forever and never terminate cleanly
+    model = ScriptedModel([tok.tool_token_id("calendar")], tok.vocab_size)
+    d = ToolDispatcher(
+        model, tok, {"calendar": lambda m: "FIFA World Cup 3rd Place Match at 9am"},
+        device=torch.device("cpu"), top_k=1,
+        verbatim={"calendar": lambda r: f"Today: {r}."},
+    )
+
+    result = d.respond("What's on my calendar?")
+
+    assert result.response == "Today: FIFA World Cup 3rd Place Match at 9am."
+    assert result.tool == "calendar"
+    assert model.i == 1  # exactly one forward pass — the routing token
+
+
+def test_non_verbatim_tool_still_generates():
+    tok = _tokenizer()
+    word = tok.encode("okay")[0]
+    model = ScriptedModel([tok.tool_token_id("weather"), word, tok.eos_id], tok.vocab_size)
+    d = ToolDispatcher(model, tok, {"weather": lambda m: "72°F, sunny"},
+                       device=torch.device("cpu"), top_k=1,
+                       verbatim={"calendar": lambda r: r})
+
+    result = d.respond("weather?")
+    assert result.tool == "weather"
+    assert model.i > 1  # generation continued past the tool call
+
+
 def test_unregistered_tool_falls_back_gracefully():
     tok = _tokenizer()
     script = [tok.tool_token_id("weather"), tok.eos_id]

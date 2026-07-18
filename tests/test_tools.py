@@ -78,6 +78,115 @@ def test_reminders_formatting():
     assert format_reminders([]) == "No reminders set"
 
 
+def test_spotify_status_question_does_not_start_playback(monkeypatch):
+    # "what's playing?" contains "play" — it must read status, never call play()
+    from src.assistant import tools
+    calls = []
+    monkeypatch.setattr(tools.spotify, "is_running", lambda: True)
+    monkeypatch.setattr(tools.spotify, "current_track", lambda: "Song by Artist")
+    monkeypatch.setattr(tools.spotify, "play", lambda: calls.append("play"))
+
+    for q in ["What's playing?", "What song is this?", "Who sings this?",
+              "What's the current song?"]:
+        assert tools.spotify_handler(q) == "Song by Artist"
+    assert calls == []
+
+
+def test_spotify_closed_app_only_launches_for_play(monkeypatch):
+    from src.assistant import tools
+    monkeypatch.setattr(tools.spotify, "is_running", lambda: False)
+    monkeypatch.setattr(tools.spotify, "play", lambda: None)
+    monkeypatch.setattr(tools.spotify, "current_track", lambda: "Song by Artist")
+
+    assert tools.spotify_handler("Pause the music.") == "Spotify isn't running"
+    assert tools.spotify_handler("Skip this song.") == "Spotify isn't running"
+    assert "Song by Artist" in tools.spotify_handler("Play some music.")
+
+
+def test_extract_play_query():
+    from src.assistant.tools import extract_play_query
+
+    assert extract_play_query("Play Bohemian Rhapsody by Queen.") == "Bohemian Rhapsody by Queen"
+    assert extract_play_query("play the song Levitating on Spotify") == "Levitating"
+    assert extract_play_query("Can you play Anti-Hero?") == "Anti-Hero"
+    # generic requests mean resume, not search
+    assert extract_play_query("Play some music.") is None
+    assert extract_play_query("Play something") is None
+    assert extract_play_query("Resume the music.") is None
+
+
+def test_spotify_specific_song_searches_and_plays(monkeypatch):
+    from src.assistant import tools
+
+    played = []
+    monkeypatch.setattr(tools.spotify, "is_running", lambda: True)
+    monkeypatch.setattr(tools.spotify, "search_track",
+                        lambda q, cid, sec: ("spotify:track:abc", "Bohemian Rhapsody by Queen"))
+    monkeypatch.setattr(tools.spotify, "play_track", lambda uri: played.append(uri))
+
+    creds = {"client_id": "id", "client_secret": "sec"}
+    reply = tools.spotify_handler("Play Bohemian Rhapsody", credentials=creds)
+    assert reply == "Now playing: Bohemian Rhapsody by Queen"
+    assert played == ["spotify:track:abc"]
+
+    # "Play the next track." must stay a skip, not a search
+    monkeypatch.setattr(tools.spotify, "next_track", lambda: None)
+    monkeypatch.setattr(tools.spotify, "current_track", lambda: "Song by Artist")
+    assert "Song by Artist" in tools.spotify_handler("Play the next track.", credentials=creds)
+    assert played == ["spotify:track:abc"]  # unchanged — no second play
+
+
+def test_spotify_specific_song_without_creds_degrades(monkeypatch):
+    from src.assistant import tools
+    monkeypatch.setattr(tools.spotify, "is_running", lambda: True)
+    reply = tools.spotify_handler("Play Bohemian Rhapsody", credentials=None)
+    assert "API keys" in reply
+
+
+def test_verbatim_replies_template_and_passthrough():
+    from src.assistant.tools import build_verbatim
+
+    v = build_verbatim()
+    assert set(v) == {"calendar", "reminders", "notes", "spotify", "stocks", "launcher"}
+    assert v["launcher"]("VS Code launched") == "VS Code is open."
+    assert v["launcher"]("Now playing: X by Y") == "Now playing: X by Y"
+    assert v["spotify"]("Love All (with JAY-Z) by Drake") == \
+        "Current track: Love All (with JAY-Z) by Drake."
+    assert v["spotify"]("Paused") == "Music paused."
+    assert v["spotify"]("Now playing: X by Y") == "Now playing: X by Y"
+    assert v["stocks"]("AAPL: $333.74 (-0.3%)") == "Your stocks: AAPL: $333.74 (-0.3%)."
+    assert v["calendar"]("Standup at 9am") == "Today: Standup at 9am."
+    assert v["calendar"]("No events today") == "Your calendar is clear today."
+    assert v["calendar"]("Calendar access not granted") == "Calendar access not granted"
+    assert v["reminders"]("Call dentist, Pay rent") == "Your reminders: Call dentist, Pay rent."
+    assert v["notes"]("Note saved: buy milk") == "Note saved: buy milk"
+    assert v["notes"]("Grocery list: milk, eggs") == "From your notes: Grocery list: milk, eggs."
+
+
+def test_launcher_delegates_play_requests_to_spotify(monkeypatch):
+    # the model routes "Play {song}" to launcher (trained launcher prompts are
+    # "Open/Start {Name}") — the handler must hand it to spotify
+    from src.assistant import tools
+
+    played = []
+    monkeypatch.setattr(tools.spotify, "is_running", lambda: True)
+    monkeypatch.setattr(tools.spotify, "search_track",
+                        lambda q, cid, sec: ("spotify:track:abc", f"{q} by Somebody"))
+    monkeypatch.setattr(tools.spotify, "play_track", lambda uri: played.append(uri))
+
+    config = {"allowed_apps": [{"name": "Spotify", "path": "/Applications/Spotify.app"}],
+              "spotify": {"client_id": "id", "client_secret": "sec"},
+              "stocks": {"watchlist": []}, "news": {"rss_feeds": []},
+              "weather": {"location": "X"}}
+    handlers = tools.build_handlers(config)
+
+    reply = handlers["launcher"]("Play Bohemian Rhapsody by Queen.")
+    assert reply == "Now playing: Bohemian Rhapsody by Queen by Somebody"
+    assert played == ["spotify:track:abc"]
+    # a real launch request still launches, not searches
+    assert tools.launcher.match_app("Open Spotify", config["allowed_apps"]) is not None
+
+
 def test_build_handlers_respects_feature_flags():
     from src.assistant.tools import build_handlers
 

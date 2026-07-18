@@ -1,19 +1,12 @@
-from pathlib import Path
-
 from rich.markup import escape
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Header, Footer, Input, RichLog
 
-from model.device import get_device
-from model.generate import load_model
-from model.tokenizer import DesktopHelperTokenizer
 from src.assistant.dispatcher import ToolDispatcher
-from src.assistant.tools import build_handlers
+from src.assistant.engine import CheckpointMissing, load_engine
 from src.config import settings
-
-TOKENIZER_PATH = "model/tokenizer.json"
 
 
 class DesktopHelperApp(App):
@@ -57,20 +50,11 @@ class DesktopHelperApp(App):
     @work(thread=True)
     def _load_model(self) -> None:
         log = self.query_one("#chat_log", RichLog)
-        checkpoint = Path(self.config["model"]["checkpoint"])
-        if not checkpoint.exists():
-            self.call_from_thread(
-                log.write,
-                f"[bold red]Model checkpoint not found:[/bold red] {checkpoint}\n"
-                "[dim]Download it from Google Drive into model/checkpoints/ "
-                "(weights are gitignored), then restart.[/dim]",
-            )
-            return
         try:
-            device = get_device(require_cuda=False)
-            tokenizer = DesktopHelperTokenizer.load(TOKENIZER_PATH)
-            model = load_model(str(checkpoint), device)
-            dispatcher = ToolDispatcher(model, tokenizer, build_handlers(self.config), device)
+            dispatcher, device = load_engine(self.config)
+        except CheckpointMissing as exc:
+            self.call_from_thread(log.write, f"[bold red]{escape(str(exc))}[/bold red]")
+            return
         except Exception as exc:
             self.call_from_thread(
                 log.write, f"[bold red]Failed to load model:[/bold red] {escape(str(exc))}"

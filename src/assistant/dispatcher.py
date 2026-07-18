@@ -58,6 +58,7 @@ class ToolDispatcher:
                                   # run-4 epoch_12 → 8 under the decaying scheme).
                                   # Higher scores the eval but degrades glue (Goodhart).
         repetition_penalty: float = 1.3,
+        verbatim: "dict[str, Callable[[str], str]] | None" = None,
     ):
         self.model = model.eval()
         self.tok = tokenizer
@@ -68,6 +69,11 @@ class ToolDispatcher:
         self.top_k = top_k
         self.copy_boost = copy_boost  # 0 disables the copy bias
         self.repetition_penalty = repetition_penalty  # 1.0 disables
+        # tools whose reply is templated from the real result instead of
+        # model-generated — fact-heavy tools (calendar, reminders, notes) where
+        # a 350M paraphrase garbles proper nouns. The model still does the
+        # routing; it just doesn't get to rewrite the facts.
+        self.verbatim = verbatim or {}
 
     def _next_token(self, seq: list[int], greedy: bool = False,
                     boost_ids: set[int] | None = None,
@@ -130,6 +136,11 @@ class ToolDispatcher:
                 seq.append(next_id)
                 tool_used = tool
                 tool_result = self._run_tool(tool, message)
+                template = self.verbatim.get(tool)
+                if template is not None:
+                    # verbatim tool: the reply is the templated result, word-perfect
+                    return DispatchResult(response=template(tool_result),
+                                          tool=tool_used, tool_result=tool_result)
                 encoded_result = self.tok.encode(tool_result)
                 result_ids = set(encoded_result)
                 seq.append(self.tok.result_start_id)

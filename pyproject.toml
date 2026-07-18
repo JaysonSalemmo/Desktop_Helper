@@ -19,6 +19,7 @@ dependencies = [
     "requests>=2.31.0",
     "transformers>=4.40.0",
     "datasets>=2.19.0",
+    "sounddevice>=0.5.5",
 ]
 
 [project.optional-dependencies]
