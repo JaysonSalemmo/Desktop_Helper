@@ -183,6 +183,12 @@ def test_launcher_delegates_play_requests_to_spotify(monkeypatch):
     reply = handlers["launcher"]("Play Bohemian Rhapsody by Queen.")
     assert reply == "Now playing: Bohemian Rhapsody by Queen by Somebody"
     assert played == ["spotify:track:abc"]
+
+    # "…on Spotify" contains the app name — must still play the song, not
+    # launch the app (found live: it opened Spotify and stopped there)
+    reply = handlers["launcher"]("Play Bohemian Rhapsody on Spotify.")
+    assert reply == "Now playing: Bohemian Rhapsody by Somebody"
+
     # a real launch request still launches, not searches
     assert tools.launcher.match_app("Open Spotify", config["allowed_apps"]) is not None
 
