@@ -1,0 +1,271 @@
+"""
+Tool handlers for the dispatcher.
+
+Each handler takes the user's message and returns a result string that gets
+injected as `[RESULT]...[/RESULT]`. The model has already chosen the tool; the
+handler parses the message to pick the specific action within that tool.
+
+Result strings deliberately match the shapes in the training data
+(model/data/tool_calls.py) — the model wraps familiar formats far more
+faithfully than novel ones.
+
+`build_handlers(config)` is the entry point: it wires every tool to its real
+backend and respects the feature flags in config.json (a disabled tool still
+responds, but says it's disabled).
+"""
+from collections.abc import Callable
+
+from src.launcher import launcher
+from src.news import news
+from src.notes import notes
+from src.screen_capture import capture
+from src.spotify import spotify
+from src.stocks import stocks
+from src.weather import weather
+
+Handler = Callable[[str], str]
+
+
+# "play …" requests with only these after the verb mean "resume", not a search
+_GENERIC_PLAY = {
+    "", "music", "some music", "the music", "something", "a song", "some songs",
+    "songs", "anything", "spotify", "it",
+}
+
+
+def extract_play_query(message: str) -> str | None:
+    """The specific thing to play, or None for a bare resume.
+
+    "Play Bohemian Rhapsody by Queen." → "Bohemian Rhapsody by Queen"
+    "Play some music."                 → None
+    """
+    lower = message.lower()
+    idx = lower.find("play ")
+    if idx == -1:
+        return None
+    query = message[idx + len("play "):].strip().rstrip(".!?")
+    for prefix in ("the song ", "the track ", "song ", "track ", "me "):
+        if query.lower().startswith(prefix):
+            query = query[len(prefix):]
+    if query.lower().endswith(" on spotify"):
+        query = query[: -len(" on spotify")].rstrip()
+    if query.lower() in _GENERIC_PLAY:
+        return None
+    return query or None
+
+
+def spotify_handler(message: str, credentials: dict | None = None) -> str:
+    m = message.lower()
+    # status questions first — "what's playing?" contains "play" and must not
+    # fall through to the play command (found live: it started playback)
+    if "what" in m or "who" in m or "current" in m:
+        return spotify.current_track()
+    # only an explicit play intent may auto-launch Spotify; every other action
+    # against a closed app would either lie ("Paused") or launch it by surprise
+    if not spotify.is_running() and not ("play" in m or "resume" in m):
+        return "Spotify isn't running"
+
+    if "pause" in m or "stop" in m:
+        spotify.pause()
+        return "Paused"
+    if "skip" in m or "next" in m:
+        spotify.next_track()
+        return f"Now playing: {spotify.current_track()}"
+    if "previous" in m or "go back" in m or "last song" in m:
+        spotify.previous_track()
+        return f"Now playing: {spotify.current_track()}"
+    if "volume up" in m or "turn up" in m or "louder" in m:
+        spotify.set_volume(85)
+        return "Volume set to 85%"
+    if "volume down" in m or "turn down" in m or "quieter" in m or "lower" in m:
+        spotify.set_volume(35)
+        return "Volume set to 35%"
+    # specific song request? ordered after the transport controls so
+    # "Play the next track." stays a skip, not a search for "the next track"
+    query = extract_play_query(message)
+    if query is not None:
+        if not credentials or not credentials.get("client_id"):
+            return "Add Spotify API keys to config.json to play specific songs"
+        found = spotify.search_track(query, credentials["client_id"],
+                                     credentials["client_secret"])
+        if found is None:
+            return f"No Spotify results for {query}"
+        uri, display = found
+        spotify.play_track(uri)
+        return f"Now playing: {display}"
+    if "resume" in m or "play" in m:
+        spotify.play()
+        return f"Now playing: {spotify.current_track()}"
+    # default intent: report what's currently playing
+    return spotify.current_track()
+
+
+_NOTE_ADD_PREFIXES = ["note that ", "note down ", "write down ", "add a note "]
+
+
+def notes_handler(message: str) -> str:
+    lower = message.lower()
+    for prefix in _NOTE_ADD_PREFIXES:
+        if prefix in lower:
+            text = message[lower.index(prefix) + len(prefix):].strip(" :.")
+            if text:
+                notes.add(text)
+                return f"Note saved: {text}"
+    todays = notes.get_today()
+    if not todays:
+        return "No notes for today"
+    return "; ".join(n["text"] for n in todays)
+
+
+# keep injected results short on permission failure — the model wraps a brief
+# result far better than a paragraph of System Settings instructions (those go
+# to the log via the raised message when debugging)
+def _calendar_handler(message: str) -> str:
+    from src.calendar_integration import events  # EventKit import deferred
+    from src.eventkit.store import AccessDenied
+    try:
+        return events.today()
+    except AccessDenied:
+        return "Calendar access not granted"
+
+
+def _reminders_handler(message: str) -> str:
+    from src.reminders import reminders  # EventKit import deferred
+    from src.eventkit.store import AccessDenied
+    try:
+        return reminders.incomplete_summary()
+    except AccessDenied:
+        return "Reminders access not granted"
+
+
+def _disabled(tool: str) -> Handler:
+    def handler(message: str) -> str:
+        return f"{tool} is disabled in config"
+    return handler
+
+
+def build_handlers(config: dict) -> dict[str, Handler]:
+    """Handler registry keyed by tool name (the value from is_tool_call)."""
+
+    def launcher_handler(message: str) -> str:
+        app = launcher.match_app(message, config.get("allowed_apps", []))
+        if app is None:
+            # routing gap: "Play {song}" looks launcher-shaped to the model
+            # (trained launcher prompts are "Open/Start {Name}") — if it's a
+            # play request for something that isn't an app, it's a song
+            if extract_play_query(message) is not None:
+                return spotify_handler(message, config.get("spotify"))
+            return "No matching app in the allowed apps list"
+        return launcher.launch(app)
+
+    def weather_handler(message: str) -> str:
+        return weather.current(config["weather"]["location"])
+
+    def news_handler(message: str) -> str:
+        found = news.headlines(
+            config["news"]["rss_feeds"], config["news"].get("max_headlines", 5)
+        )
+        return "; ".join(found) if found else "No headlines available right now"
+
+    def stocks_handler(message: str) -> str:
+        return stocks.quotes(message, config["stocks"]["watchlist"])
+
+    def screen_handler(message: str) -> str:
+        return capture.describe()
+
+    handlers = {
+        "spotify": lambda m: spotify_handler(m, config.get("spotify")),
+        "calendar": _calendar_handler,
+        "screen": screen_handler,
+        "reminders": _reminders_handler,
+        "notes": notes_handler,
+        "launcher": launcher_handler,
+        "weather": weather_handler,
+        "news": news_handler,
+        "stocks": stocks_handler,
+    }
+
+    # feature flags in config.json (launcher has no flag — always on)
+    flags = config.get("features", {})
+    flag_names = {tool: tool for tool in handlers} | {"screen": "screen_capture"}
+    for tool, flag in flag_names.items():
+        if not flags.get(flag, True):
+            handlers[tool] = _disabled(tool)
+    return handlers
+
+
+# -- verbatim replies ---------------------------------------------------------
+# Fact-heavy tools skip the model's paraphrase entirely: the dispatcher routes
+# via the model, then templates the reply straight from the real result, so
+# event titles / reminder items / note text come out word-perfect. Fallback
+# strings ("access not granted", "disabled in config", errors, empty results)
+# pass through untemplated since they're already sentences about the situation.
+
+def _is_fallback(result: str) -> bool:
+    return ("not granted" in result or "disabled in config" in result
+            or "error:" in result or "not available" in result)
+
+
+def _calendar_reply(result: str) -> str:
+    if result == "No events today":
+        return "Your calendar is clear today."
+    if _is_fallback(result):
+        return result
+    return f"Today: {result}."
+
+
+def _reminders_reply(result: str) -> str:
+    if result == "No reminders set":
+        return "You don't have any reminders set."
+    if _is_fallback(result):
+        return result
+    return f"Your reminders: {result}."
+
+
+def _notes_reply(result: str) -> str:
+    if result == "No notes for today":
+        return "You haven't written any notes today."
+    if _is_fallback(result) or result.startswith("Note saved:"):
+        return result
+    return f"From your notes: {result}."
+
+
+def _spotify_reply(result: str) -> str:
+    if result == "Paused":
+        return "Music paused."
+    # handler results that are already sentences pass through
+    if result.startswith(("Now playing:", "Volume set", "Spotify isn't", "Nothing playing")) \
+            or _is_fallback(result):
+        return result
+    # bare "Track by Artist" status — neutral phrasing, we don't know play state
+    return f"Current track: {result}."
+
+
+def _stocks_reply(result: str) -> str:
+    if _is_fallback(result):
+        return result
+    return f"Your stocks: {result}."
+
+
+def _launcher_reply(result: str) -> str:
+    if result.endswith(" launched"):
+        return f"{result[: -len(' launched')]} is open."
+    # fallbacks and spotify-delegated replies are already sentences
+    return result
+
+
+def build_verbatim() -> dict[str, Handler]:
+    """Tool → reply template for the dispatcher's verbatim mode.
+
+    Criterion: tools whose replies name arbitrary proper nouns (event titles,
+    track/artist names, app names) or numbers that must be exact (money).
+    Weather, news, and screen keep the model's voice for now — revisit if
+    their garbling grates."""
+    return {
+        "calendar": _calendar_reply,
+        "reminders": _reminders_reply,
+        "notes": _notes_reply,
+        "spotify": _spotify_reply,
+        "stocks": _stocks_reply,
+        "launcher": _launcher_reply,
+    }

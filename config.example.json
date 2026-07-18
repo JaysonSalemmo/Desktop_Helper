@@ -33,8 +33,12 @@
     "weather": {
         "location": "Your City"
     },
+    "spotify": {
+        "client_id": "YOUR_SPOTIFY_CLIENT_ID",
+        "client_secret": "YOUR_SPOTIFY_CLIENT_SECRET"
+    },
     "hotkey": "<ctrl>+<space>",
     "model": {
-        "checkpoint": "model/checkpoints/latest.pt"
+        "checkpoint": "model/checkpoints/epoch_08.pt"
     }
 }

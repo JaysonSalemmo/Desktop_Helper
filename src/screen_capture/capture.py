@@ -17,9 +17,27 @@ def capture() -> Path:
 
 
 def describe() -> str:
-    """Capture screen and return a text description for the model to respond to.
+    """Text description of what's on screen for the model to respond to.
 
-    Phase 4: wire this to an OCR pass or a lightweight vision encoder so the
-    local transformer receives a text representation of what's on screen.
+    Reports the frontmost app and other visible apps via NSWorkspace — real
+    data with no screen-recording permission needed. A true visual description
+    (OCR / vision encoder over capture()) remains future work.
     """
-    raise NotImplementedError("Screen capture tool not yet wired to local model.")
+    from AppKit import NSApplicationActivationPolicyRegular, NSWorkspace
+
+    workspace = NSWorkspace.sharedWorkspace()
+    front = workspace.frontmostApplication()
+    front_name = str(front.localizedName()) if front else None
+
+    others = sorted(
+        str(app.localizedName())
+        for app in workspace.runningApplications()
+        if app.activationPolicy() == NSApplicationActivationPolicyRegular
+        and str(app.localizedName()) != front_name
+    )
+
+    if front_name is None:
+        return "Open apps: " + ", ".join(others) if others else "No apps open"
+    if not others:
+        return f"{front_name} in front"
+    return f"{front_name} in front, also open: {', '.join(others)}"

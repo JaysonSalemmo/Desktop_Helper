@@ -5,11 +5,13 @@ __pycache__/
 .DS_Store
 PLAN.md
 DEVLOG.md
+STATUS.md
 checkpoints/
-data/
+/data/
 model/checkpoints/
 *.pt
 *.bin
 *.safetensors
 logs/
 wandb/
+*.app/
