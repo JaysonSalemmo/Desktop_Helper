@@ -40,7 +40,17 @@ def load_engine(config: dict) -> tuple[ToolDispatcher, torch.device]:
     device = get_device(require_cuda=False)
     tokenizer = DesktopHelperTokenizer.load(str(TOKENIZER_PATH))
     model = load_model(str(checkpoint), device)
-    dispatcher = ToolDispatcher(model, tokenizer, build_handlers(config), device,
+
+    memory = None
+    if config.get("features", {}).get("memory", True):
+        try:
+            from src.memory.memory import ChromaMemory
+            memory = ChromaMemory(str(PROJECT_ROOT / "data" / "memory"))
+        except Exception:
+            pass  # memory is a convenience — the assistant works without it
+
+    dispatcher = ToolDispatcher(model, tokenizer, build_handlers(config, memory), device,
                                 verbatim=build_verbatim(),
-                                fallback_router=build_fallback_router())
+                                fallback_router=build_fallback_router(config),
+                                memory=memory)
     return dispatcher, device

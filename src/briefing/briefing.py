@@ -42,21 +42,24 @@ def _greeting(name: str, now: datetime) -> str:
     return f"Good {part}, {name} — {date}."
 
 
-def compose(config: dict, weather_fn=_default_weather, calendar_fn=_default_calendar,
-            news_fn=_default_news, now: datetime | None = None) -> str:
+def compose_sections(config: dict, weather_fn=_default_weather,
+                     calendar_fn=_default_calendar, news_fn=_default_news,
+                     now: datetime | None = None) -> list[str]:
+    """The briefing as separate sections (greeting, weather, calendar,
+    headlines) — the chat panel shows each as its own bubble."""
     now = now or datetime.now()
     flags = config.get("features", {})
-    lines = [_greeting(config["user"]["name"], now)]
+    sections = [_greeting(config["user"]["name"], now)]
 
     if flags.get("weather", True):
         try:
-            lines.append(f"Weather: {weather_fn(config)}")
+            sections.append(f"Weather: {weather_fn(config)}")
         except Exception:
             pass  # a dead section shouldn't kill the briefing
 
     if flags.get("calendar", True):
         try:
-            lines.append(f"Calendar: {calendar_fn(config)}")
+            sections.append(f"Calendar: {calendar_fn(config)}")
         except Exception:
             pass
 
@@ -64,9 +67,13 @@ def compose(config: dict, weather_fn=_default_weather, calendar_fn=_default_cale
         try:
             headlines = news_fn(config)
             if headlines:
-                lines.append("Headlines:")
-                lines.extend(f"• {h}" for h in headlines)
+                sections.append("Headlines:\n" + "\n".join(f"• {h}" for h in headlines))
         except Exception:
             pass
 
-    return "\n".join(lines)
+    return sections
+
+
+def compose(config: dict, **kwargs) -> str:
+    """The briefing as one text block (TUI, tests, logs)."""
+    return "\n".join(compose_sections(config, **kwargs))

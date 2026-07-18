@@ -8,6 +8,7 @@ client-credentials flow: just the app id/secret from config, no OAuth login.
 import base64
 import random
 import subprocess
+import threading
 import time
 
 import requests
@@ -78,9 +79,36 @@ def set_volume(level: int) -> None:
     _run(f'tell application "Spotify" to set sound volume to {level}')
 
 
+def _is_minimized() -> bool:
+    """Best effort — needs the System Events automation permission."""
+    out = _run('tell application "System Events" to tell process "Spotify" to '
+               'get value of attribute "AXMinimized" of window 1')
+    return out == "true"
+
+
+def _set_minimized() -> None:
+    _run('tell application "System Events" to tell process "Spotify" to '
+         'set value of attribute "AXMinimized" of window 1 to true')
+
+
+def _ensure_minimized(duration: float = 3.0) -> None:
+    """Watchdog: Spotify surfaces its window a beat AFTER the play command
+    returns, so a single immediate re-minimize fires too early. Watch for a
+    few seconds and tuck the window back down when it pops up."""
+    deadline = time.time() + duration
+    while time.time() < deadline:
+        time.sleep(0.4)
+        if not _is_minimized():
+            _set_minimized()
+
+
 def play_track(uri: str) -> None:
     """Play a specific track by Spotify URI (spotify:track:...)."""
+    was_minimized = _is_minimized()
     _run(f'tell application "Spotify" to play track "{uri}"')
+    if was_minimized:
+        # off-thread so the reply isn't delayed by the watchdog
+        threading.Thread(target=_ensure_minimized, daemon=True).start()
 
 
 def _api_token(client_id: str, client_secret: str) -> str:
@@ -123,10 +151,20 @@ def search_track(query: str, client_id: str, client_secret: str) -> tuple[str, s
     return _describe(items[0]) if items else None
 
 
+# last random pick per artist — "another song by Drake" must not repeat it
+_last_pick: dict = {}
+
+
 def search_artist_track(artist: str, client_id: str, client_secret: str) -> tuple[str, str] | None:
     """A *random* track by the artist — for vague requests ("a song by Drake"),
     where a deterministic top hit would play the same song forever.
 
     limit=10 is the max this API tier allows ("Invalid limit" above that)."""
     items = _search(f'artist:"{artist}"', 10, client_id, client_secret)
-    return _describe(random.choice(items)) if items else None
+    if not items:
+        return None
+    key = artist.lower()
+    fresh = [t for t in items if t["uri"] != _last_pick.get(key)] or items
+    track = random.choice(fresh)
+    _last_pick[key] = track["uri"]
+    return _describe(track)
