@@ -143,6 +143,34 @@ def test_spotify_specific_song_without_creds_degrades(monkeypatch):
     assert "API keys" in reply
 
 
+def test_extract_artist_request():
+    from src.assistant.tools import extract_artist_request
+
+    assert extract_artist_request("a song by Drake") == "Drake"
+    assert extract_artist_request("something by Bruno Mars") == "Bruno Mars"
+    assert extract_artist_request("music by The Weeknd") == "The Weeknd"
+    # a specific track must NOT be treated as an artist request
+    assert extract_artist_request("Passionfruit by Drake") is None
+    assert extract_artist_request("Bohemian Rhapsody by Queen") is None
+
+
+def test_vague_artist_request_uses_random_pick(monkeypatch):
+    from src.assistant import tools
+
+    calls = []
+    monkeypatch.setattr(tools.spotify, "is_running", lambda: True)
+    monkeypatch.setattr(tools.spotify, "search_artist_track",
+                        lambda a, cid, sec: calls.append(a) or ("spotify:track:x", "Some Song by Drake"))
+    monkeypatch.setattr(tools.spotify, "search_track",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("wrong search")))
+    monkeypatch.setattr(tools.spotify, "play_track", lambda uri: None)
+
+    creds = {"client_id": "id", "client_secret": "sec"}
+    reply = tools.spotify_handler("Play a song by Drake", credentials=creds)
+    assert reply == "Now playing: Some Song by Drake"
+    assert calls == ["Drake"]
+
+
 def test_extract_location():
     from src.assistant.tools import extract_location
 

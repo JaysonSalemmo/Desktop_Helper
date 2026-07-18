@@ -14,12 +14,26 @@ first real transcription isn't slow.
 First mic use triggers the macOS microphone permission prompt, attributed to
 the hosting terminal (or, later, the bundled .app).
 """
+import subprocess
 import threading
 
 import numpy as np
 
 SAMPLE_RATE = 16_000  # what whisper expects
 WHISPER_MODEL = "base.en"
+
+_say_process: subprocess.Popen | None = None
+
+
+def speak(text: str) -> None:
+    """Speak text aloud via macOS `say` (offline, built-in voices).
+
+    Non-blocking; a new utterance interrupts the previous one so queued
+    replies never talk over each other."""
+    global _say_process
+    if _say_process is not None and _say_process.poll() is None:
+        _say_process.terminate()
+    _say_process = subprocess.Popen(["say", text])
 
 
 class VoiceRecorder:
