@@ -23,9 +23,10 @@ Title doubles as a status indicator: ⏳ loading → ◆ ready → 🎤 listenin
 … thinking.
 """
 import threading
+import traceback
 
 import rumps
-from AppKit import NSAlert, NSApplication, NSFloatingWindowLevel, NSImage
+from AppKit import NSApplication, NSFloatingWindowLevel, NSImage
 from PyObjCTools import AppHelper
 
 from src.assistant.engine import PROJECT_ROOT, load_engine
@@ -77,6 +78,7 @@ class DesktopHelperMenuBar(rumps.App):
         menu.append(self.briefing_item)
         self.menu = [*menu, None, self.status_item]
 
+        self._panel = None  # ReplyPanel, created lazily on the main thread
         self._hotkeys = None
         self._start_hotkey()  # before the load thread — _load_model reads _hotkeys
         threading.Thread(target=self._load_model, daemon=True).start()
@@ -84,18 +86,36 @@ class DesktopHelperMenuBar(rumps.App):
             # briefing needs no model — deliver as a notification while it loads
             threading.Thread(target=self._startup_briefing, daemon=True).start()
 
+    # -- error visibility ----------------------------------------------------
+
+    def _on_main(self, fn, *args) -> None:
+        """callAfter with a safety net: exceptions in main-thread UI callbacks
+        otherwise vanish silently (a turn 'stops working' with no trace).
+        Logs the traceback and releases the busy flag so the app recovers."""
+        AppHelper.callAfter(self._safely, fn, *args)
+
+    def _safely(self, fn, *args) -> None:
+        try:
+            fn(*args)
+        except Exception:
+            print(f"UI error in {getattr(fn, '__name__', fn)}:\n{traceback.format_exc()}",
+                  flush=True)
+            self.busy = False
+            self.title = TITLE_READY
+
     # -- startup ------------------------------------------------------------
 
     def _load_model(self) -> None:
         try:
             dispatcher, device = load_engine(self.config)
         except Exception as exc:
-            AppHelper.callAfter(self._set_status, "⚠️", f"Model failed to load: {exc}")
+            self._on_main(self._set_status, "⚠️", f"Model failed to load: {exc}")
             return
         self.dispatcher = dispatcher
-        hotkey_hint = f"  ({self.hotkey_combo})" if self._hotkeys else ""
+        hotkey_live = self._hotkeys is not None and self._hotkeys.ok
+        hotkey_hint = f"  ({self.hotkey_combo})" if hotkey_live else ""
         self._ready_status = f"Ready on {device.type}{hotkey_hint}"
-        AppHelper.callAfter(self._set_status, TITLE_READY, self._ready_status)
+        self._on_main(self._set_status, TITLE_READY, self._ready_status)
         if self.transcriber is not None:
             self.transcriber.warm_up()  # download/load whisper off the hot path
 
@@ -105,17 +125,16 @@ class DesktopHelperMenuBar(rumps.App):
 
     def _start_hotkey(self) -> None:
         try:
-            from pynput import keyboard
+            from src.menubar.hotkey import HotkeyListener, parse_combo
+            keycode, flags = parse_combo(self.hotkey_combo)
             # voice on: hotkey toggles listening; voice off: hotkey opens the prompt
             action = self._toggle_voice if self.voice_enabled else self._ask_clicked
-            self._hotkeys = keyboard.GlobalHotKeys({
-                # hotkey fires on pynput's thread → hop to the main thread
-                self.hotkey_combo: lambda: AppHelper.callAfter(action, None)
-            })
-            self._hotkeys.daemon = True
+            # fires on the tap thread → hop to the main thread
+            self._hotkeys = HotkeyListener(keycode, flags,
+                                           lambda: self._on_main(action, None))
             self._hotkeys.start()
         except Exception:
-            # needs Input Monitoring permission; the menu item still works
+            # unparseable combo etc. — the menu items still work
             self._hotkeys = None
 
     # -- ask flow (main thread) ---------------------------------------------
@@ -167,13 +186,16 @@ class DesktopHelperMenuBar(rumps.App):
         self._show_briefing()
 
     def _show_briefing(self) -> None:
-        """Worker thread: compose (network + EventKit) then show the alert."""
+        """Worker thread: compose (network + EventKit) then show as bubbles."""
         from src.briefing import briefing
         try:
-            text = briefing.compose(self.config)
+            sections = briefing.compose_sections(self.config)
         except Exception as exc:
-            text = f"Briefing failed: {exc}"
-        AppHelper.callAfter(self._show_alert, "Morning Briefing", text)
+            sections = [f"Briefing failed: {exc}"]
+        self._on_main(self._show_briefing_sections, sections)
+
+    def _show_briefing_sections(self, sections: list[str]) -> None:
+        self._get_panel().show_sections("Morning Briefing", sections)
 
     @staticmethod
     def _float_front(ns_window) -> None:
@@ -183,14 +205,29 @@ class DesktopHelperMenuBar(rumps.App):
         ns_window.setLevel_(NSFloatingWindowLevel)
         ns_window.orderFrontRegardless()
 
+    def _get_panel(self):
+        if self._panel is None:
+            from src.menubar.panel import ReplyPanel
+            actions = {}
+            if self.voice_enabled:
+                actions["Speak"] = lambda: self._toggle_voice(None)
+            actions["Briefing"] = lambda: self._briefing_clicked(None)
+            self._panel = ReplyPanel(on_followup=self._followup, actions=actions)
+        return self._panel
+
     def _show_alert(self, title: str, body: str) -> None:
-        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-        alert = NSAlert.alloc().init()
-        alert.setMessageText_(title)
-        alert.setInformativeText_(body)
-        alert.addButtonWithTitle_("OK")
-        self._float_front(alert.window())
-        alert.runModal()
+        """Non-modal reply panel (replaced the modal NSAlert flow — nothing
+        blocks; the follow-up field keeps the conversation going)."""
+        self._get_panel().show(title, body)
+
+    def _followup(self, text: str) -> None:
+        """Main thread — panel input submitted."""
+        if self.busy or self.dispatcher is None:
+            return
+        self.busy = True
+        self.title = TITLE_THINKING
+        self._get_panel().show_thinking(text)
+        threading.Thread(target=self._respond, args=(text,), daemon=True).start()
 
     # -- voice flow ----------------------------------------------------------
 
@@ -209,6 +246,7 @@ class DesktopHelperMenuBar(rumps.App):
             self.status_item.title = f"Listening… ({self.hotkey_combo} to stop)"
             if self.voice_enabled:
                 self.speak_item.title = "Stop listening"
+            self._get_panel().set_action_state("Speak", True, "🎤 Stop")
             return
 
         audio = self.recorder.stop()
@@ -217,6 +255,7 @@ class DesktopHelperMenuBar(rumps.App):
         self.status_item.title = "Transcribing…"
         if self.voice_enabled:
             self.speak_item.title = "Speak"
+        self._get_panel().set_action_state("Speak", False)
         threading.Thread(target=self._transcribe_and_respond, args=(audio,),
                          daemon=True).start()
 
@@ -225,12 +264,12 @@ class DesktopHelperMenuBar(rumps.App):
         try:
             text = self.transcriber.transcribe(audio)
         except Exception as exc:
-            AppHelper.callAfter(self._show_reply, "Voice", f"Transcription failed: {exc}")
+            self._on_main(self._show_reply, "Voice", f"Transcription failed: {exc}")
             return
         if not text:
-            AppHelper.callAfter(self._voice_heard_nothing)
+            self._on_main(self._voice_heard_nothing)
             return
-        AppHelper.callAfter(self._set_status, TITLE_THINKING, f"“{text}”")
+        self._on_main(self._set_status, TITLE_THINKING, f"“{text}”")
         self._respond(text, spoken=True)
 
     def _voice_heard_nothing(self) -> None:
@@ -244,7 +283,9 @@ class DesktopHelperMenuBar(rumps.App):
         try:
             result = self.dispatcher.respond(message)
             body = result.response
-            if result.tool is not None:
+            # ground-truth line only where the model wrote the reply and could
+            # have garbled it — verbatim tools' replies ARE the ground truth
+            if result.tool is not None and result.tool not in self.dispatcher.verbatim:
                 body += f"\n\n[{result.tool}] {result.tool_result}"
             if spoken and self.voice_replies:
                 # you talked to it — it talks back (reply only, not the tool line)
@@ -252,7 +293,7 @@ class DesktopHelperMenuBar(rumps.App):
                 speak(result.response)
         except Exception as exc:
             body = f"Error: {exc}"
-        AppHelper.callAfter(self._show_reply, message, body)
+        self._on_main(self._show_reply, message, body)
 
     def _show_reply(self, message: str, body: str) -> None:
         self.busy = False

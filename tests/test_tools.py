@@ -62,6 +62,18 @@ def test_weather_condition_mapping():
     assert condition_text(999) == "unsettled"
 
 
+def test_nws_condition_mapping():
+    from src.weather.weather import nws_condition
+
+    assert nws_condition("Thunderstorm") == "stormy"
+    assert nws_condition("Thunderstorms and Rain") == "stormy"
+    assert nws_condition("Fog/Mist") == "foggy"
+    assert nws_condition("Partly Cloudy") == "partly cloudy"
+    assert nws_condition("Light Rain") == "light rain"
+    assert nws_condition("Fair") == "sunny"
+    assert nws_condition("Smoke") == "smoke"  # unmapped → lowercase verbatim
+
+
 def test_calendar_time_format_matches_training_shapes():
     assert format_time(datetime(2026, 7, 17, 9, 0)) == "9am"
     assert format_time(datetime(2026, 7, 17, 15, 30)) == "3:30pm"
@@ -149,6 +161,11 @@ def test_extract_artist_request():
     assert extract_artist_request("a song by Drake") == "Drake"
     assert extract_artist_request("something by Bruno Mars") == "Bruno Mars"
     assert extract_artist_request("music by The Weeknd") == "The Weeknd"
+    # "another" variants — unmatched, these became literal searches and hit
+    # metadata ambushes (Weird Al's Bruno Mars parody)
+    assert extract_artist_request("another song by Drake") == "Drake"
+    assert extract_artist_request("Another song by Bruno Mars.") == "Bruno Mars"
+    assert extract_artist_request("play another one by Queen") == "Queen"
     # a specific track must NOT be treated as an artist request
     assert extract_artist_request("Passionfruit by Drake") is None
     assert extract_artist_request("Bohemian Rhapsody by Queen") is None
@@ -170,6 +187,11 @@ def test_vague_artist_request_uses_random_pick(monkeypatch):
     assert reply == "Now playing: Some Song by Drake"
     assert calls == ["Drake"]
 
+    # playless phrasing still works ("Another song by X")
+    reply = tools.spotify_handler("Another song by Bruno Mars.", credentials=creds)
+    assert reply == "Now playing: Some Song by Drake"
+    assert calls == ["Drake", "Bruno Mars"]
+
 
 def test_extract_location():
     from src.assistant.tools import extract_location
@@ -188,15 +210,31 @@ def test_fallback_router_covers_weather_and_spotify():
     assert fallback("How is the weather today in New York?") == "weather"
     assert fallback("What's the temperature outside right now?") == "weather"
     assert fallback("Play Passionfruit by Drake on Spotify") == "spotify"
-    assert fallback("Hello there!") is None
-    assert fallback("Tell me a joke") is None
+    # unrouted chat → canned handler, never 350M word salad
+    assert fallback("Hello there!") == "chat"
+    assert fallback("Tell me a joke") == "chat"
+    # …unless the model_chat flag opts back into free generation
+    salad = build_fallback_router({"features": {"model_chat": True}})
+    assert salad("Hello there!") is None
+
+
+def test_chat_handler_canned_replies():
+    from src.assistant.tools import make_chat_handler
+
+    chat = make_chat_handler({"user": {"name": "Kai"}})
+    assert chat("Hello Desktop Helper").startswith("Hey Kai!")
+    assert chat("good morning!").startswith("Hey Kai!")
+    assert chat("thanks!") == "Anytime!"
+    assert "calendar" in chat("What can you do?")
+    assert chat("Tell me a joke").startswith("I'm not sure how to help")
 
 
 def test_verbatim_replies_template_and_passthrough():
     from src.assistant.tools import build_verbatim
 
     v = build_verbatim()
-    assert set(v) == {"calendar", "reminders", "notes", "spotify", "stocks", "launcher"}
+    assert set(v) == {"calendar", "reminders", "notes", "spotify", "stocks",
+                      "launcher", "memory", "chat"}
     assert v["launcher"]("VS Code launched") == "VS Code is open."
     assert v["launcher"]("Now playing: X by Y") == "Now playing: X by Y"
     assert v["spotify"]("Love All (with JAY-Z) by Drake") == \
@@ -255,7 +293,7 @@ def test_build_handlers_respects_feature_flags():
     handlers = build_handlers(config)
     assert set(handlers) == {
         "spotify", "calendar", "screen", "reminders", "notes",
-        "launcher", "weather", "news", "stocks",
+        "launcher", "weather", "news", "stocks", "memory", "chat",
     }
     assert handlers["weather"]("any") == "weather is disabled in config"
     assert handlers["screen"]("any") == "screen is disabled in config"

@@ -61,6 +61,7 @@ class ToolDispatcher:
         verbatim: "dict[str, Callable[[str], str]] | None" = None,
         fallback_router: "Callable[[str], str | None] | None" = None,
         route_confidence: float = 0.9,
+        memory=None,  # optional ChromaMemory — records every completed exchange
     ):
         self.model = model.eval()
         self.tok = tokenizer
@@ -86,6 +87,7 @@ class ToolDispatcher:
         # them cleanly. Below the gate, tool tokens are masked and the turn
         # becomes plain chat.
         self.route_confidence = route_confidence
+        self.memory = memory
         self._tool_ids = {i for i in range(100)
                           if tokenizer.is_tool_call(i) is not None}
 
@@ -137,6 +139,15 @@ class ToolDispatcher:
 
     @torch.no_grad()
     def respond(self, message: str) -> DispatchResult:
+        result = self._respond(message)
+        if self.memory is not None:
+            try:
+                self.memory.record(message, result.response, result.tool)
+            except Exception:
+                pass  # memory is a convenience — never fail the turn over it
+        return result
+
+    def _respond(self, message: str) -> DispatchResult:
         # prime with the training format: <bos> prompt \n
         seq = [self.tok.bos_id] + self.tok.encode(f"{message}\n")
         response_start = len(seq)  # where the final reply begins (updated after a tool call)

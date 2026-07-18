@@ -84,6 +84,8 @@ def spotify_handler(message: str, credentials: dict | None = None) -> str:
     # specific song request? ordered after the transport controls so
     # "Play the next track." stays a skip, not a search for "the next track"
     query = extract_play_query(message)
+    if query is None and extract_artist_request(message) is not None:
+        query = message  # "Another song by Bruno Mars" — no "play", still a request
     if query is not None:
         if not credentials or not credentials.get("client_id"):
             return "Add Spotify API keys to config.json to play specific songs"
@@ -150,8 +152,11 @@ def _disabled(tool: str) -> Handler:
     return handler
 
 
-def build_handlers(config: dict) -> dict[str, Handler]:
-    """Handler registry keyed by tool name (the value from is_tool_call)."""
+def build_handlers(config: dict, memory=None) -> dict[str, Handler]:
+    """Handler registry keyed by tool name (the value from is_tool_call).
+
+    `memory` (ChromaMemory) backs the "memory" pseudo-tool — no model token
+    exists for it; it's reached only via the fallback router."""
 
     def launcher_handler(message: str) -> str:
         # play-queries win BEFORE app matching: "Play Bohemian Rhapsody on
@@ -182,6 +187,20 @@ def build_handlers(config: dict) -> dict[str, Handler]:
     def screen_handler(message: str) -> str:
         return capture.describe()
 
+    def memory_handler(message: str) -> str:
+        if memory is None:
+            return "Memory isn't set up"
+        hits = memory.search(message, n=2)
+        if not hits:
+            return "We haven't talked about anything like that yet"
+        parts = []
+        for m in hits:
+            reply = m["response"]
+            if len(reply) > 120:
+                reply = reply[:117] + "…"
+            parts.append(f'you asked “{m["message"]}” and I said “{reply}”')
+        return "Earlier " + "; before that, ".join(parts) + "."
+
     handlers = {
         "spotify": lambda m: spotify_handler(m, config.get("spotify")),
         "calendar": _calendar_handler,
@@ -192,6 +211,8 @@ def build_handlers(config: dict) -> dict[str, Handler]:
         "weather": weather_handler,
         "news": news_handler,
         "stocks": stocks_handler,
+        "memory": memory_handler,  # fallback-router only — no model token
+        "chat": make_chat_handler(config),  # fallback-router only
     }
 
     # feature flags in config.json (launcher has no flag — always on)
@@ -263,35 +284,88 @@ def _launcher_reply(result: str) -> str:
     return result
 
 
-def build_fallback_router() -> Handler:
+def build_fallback_router(config: dict | None = None) -> Handler:
     """Routes messages the model failed to route (no [CALL] emitted at all).
 
-    Deliberately narrow: only patterns we've *seen* the model miss. Broad
-    keyword routing here would defeat the point of learned routing."""
+    Tool patterns are deliberately narrow: only ones we've *seen* the model
+    miss. The final "chat" catch-all exists because 350M free generation is
+    word salad — canned honesty beats fluent nonsense. Set
+    features.model_chat=true to let the model babble instead."""
+    features = (config or {}).get("features", {})
+    model_chat = features.get("model_chat", False)
+
     def fallback(message: str) -> str | None:
         lower = message.lower()
+        # memory questions FIRST — "what did you play earlier?" contains
+        # "play …" and would otherwise become a spotify search for "earlier"
+        if any(k in lower for k in ("earlier", "last time", "what did i",
+                                    "what did you", "remember", "we talk")):
+            return "memory"
         # "Play {song} on Spotify" — outside training distribution, produced
-        # gibberish chat instead of a tool call
-        if extract_play_query(message) is not None or "spotify" in lower:
+        # gibberish chat instead of a tool call; "Another song by X" has no
+        # "play" at all but is still a music request
+        if extract_play_query(message) is not None or "spotify" in lower \
+                or extract_artist_request(message) is not None:
             return "spotify"
         # "How is the weather in New York?" — naming a location makes the
         # model treat it as a general question (argmax = text, no call)
         if "weather" in lower or "forecast" in lower or "temperature" in lower:
             return "weather"
-        return None
+        return None if model_chat else "chat"
     return fallback
 
 
+# -- small talk ---------------------------------------------------------------
+
+_GREETINGS = ("hello", "hi", "hey", "yo", "sup", "good morning",
+              "good afternoon", "good evening", "what's up", "whats up")
+
+_CAPABILITIES = ("I can check your calendar, reminders, weather, news, and "
+                 "stocks, read your notes, describe your screen, play music "
+                 "on Spotify, and remember what we've talked about.")
+
+
+def _is_greeting(message: str) -> bool:
+    m = message.lower().strip(" .!?,")
+    return any(m == g or m.startswith(g + " ") or m.startswith(g + ",")
+               for g in _GREETINGS)
+
+
+def make_chat_handler(config: dict) -> Handler:
+    """Canned small talk for unrouted messages — the model's free-form chat
+    is word salad at 350M, so honesty beats fluent nonsense."""
+    name = config.get("user", {}).get("name", "there")
+
+    def chat_handler(message: str) -> str:
+        m = message.lower()
+        if _is_greeting(message):
+            return f"Hey {name}! {_CAPABILITIES}"
+        if "thank" in m:
+            return "Anytime!"
+        if "what can you do" in m or "who are you" in m or "what are you" in m \
+                or m.strip(" .!?") == "help":
+            return _CAPABILITIES
+        return ("I'm not sure how to help with that one. "
+                f"{_CAPABILITIES}")
+
+    return chat_handler
+
+
 # vague "…{something generic} by {artist}" — asks for *an* artist song, not a
-# specific track; "Passionfruit by Drake" won't match (non-generic lead)
+# specific track; "Passionfruit by Drake" won't match (non-generic lead).
+# "another …" variants matter: unmatched they became literal searches, and
+# Spotify's catalog contains ambushes like Weird Al's "Another Tattoo
+# (Parody of … by B.o.B feat. Bruno Mars)".
 _ARTIST_REQUEST_RE = re.compile(
-    r"^(?:a song|a track|something|some music|music|songs|anything)\s+by\s+(.+)$",
+    r"^(?:play )?(?:another song|another track|another one|another|"
+    r"a different song|something else|a song|a track|something|some music|"
+    r"music|songs|anything)\s+by\s+(.+)$",
     re.IGNORECASE,
 )
 
 
-def extract_artist_request(query: str) -> str | None:
-    match = _ARTIST_REQUEST_RE.match(query.strip())
+def extract_artist_request(text: str) -> str | None:
+    match = _ARTIST_REQUEST_RE.match(text.strip().rstrip(".!?"))
     return match.group(1).strip() if match else None
 
 
@@ -318,4 +392,6 @@ def build_verbatim() -> dict[str, Handler]:
         "spotify": _spotify_reply,
         "stocks": _stocks_reply,
         "launcher": _launcher_reply,
+        "memory": lambda result: result,  # handler already returns a sentence
+        "chat": lambda result: result,
     }
