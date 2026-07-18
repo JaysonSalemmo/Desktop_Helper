@@ -25,6 +25,12 @@ WHISPER_MODEL = "base.en"
 _say_process: subprocess.Popen | None = None
 
 
+def is_speaking() -> bool:
+    """True while a `say` utterance is still playing — the wake-word listener
+    gates on this so the assistant can't wake itself."""
+    return _say_process is not None and _say_process.poll() is None
+
+
 def speak(text: str) -> None:
     """Speak text aloud via macOS `say` (offline, built-in voices).
 

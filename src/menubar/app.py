@@ -74,17 +74,52 @@ class DesktopHelperMenuBar(rumps.App):
                                                      callback=self._toggle_voice_replies)
             self.voice_replies_item.state = 1 if self.voice_replies else 0
             menu.append(self.voice_replies_item)
+            self.wake_enabled = self.config.get("features", {}).get("wake_word", False)
+            if self.wake_enabled:
+                # menu toggle only shows when the feature is opted into via
+                # config — parked until the custom "hey helper" model exists
+                self.wake_item = rumps.MenuItem("Wake Word (“hey Jarvis”)",
+                                                callback=self._toggle_wake)
+                self.wake_item.state = 1
+                menu.append(self.wake_item)
         self.briefing_item = rumps.MenuItem("Morning Briefing", callback=self._briefing_clicked)
         menu.append(self.briefing_item)
         self.menu = [*menu, None, self.status_item]
+        self._apply_keybind_labels()
 
         self._panel = None  # ReplyPanel, created lazily on the main thread
+        self._wake = None   # WakeWordListener, created on first enable
+        if self.voice_enabled and getattr(self, "wake_enabled", False):
+            self._start_wake()
         self._hotkeys = None
         self._start_hotkey()  # before the load thread — _load_model reads _hotkeys
         threading.Thread(target=self._load_model, daemon=True).start()
         if self.config.get("features", {}).get("startup_briefing", False):
             # briefing needs no model — deliver as a notification while it loads
             threading.Thread(target=self._startup_briefing, daemon=True).start()
+
+    def _apply_keybind_labels(self) -> None:
+        """Show each action's global keybind on its menu item, native-style
+        (dim, right-aligned). Display only — the tap consumes real presses."""
+        from src.menubar.hotkey import combo_display
+        keybinds = dict(self.config.get("keybinds") or {})
+        if not keybinds:
+            keybinds["speak" if self.voice_enabled else "ask"] = self.hotkey_combo
+        items = {"ask": self.ask_item, "briefing": self.briefing_item}
+        if self.voice_enabled:
+            items["speak"] = self.speak_item
+        for name, combo in keybinds.items():
+            item = items.get(name)
+            if item is None or not combo:
+                continue
+            display = combo_display(combo)
+            if display is None:
+                continue
+            try:
+                item._menuitem.setKeyEquivalent_(display[0])
+                item._menuitem.setKeyEquivalentModifierMask_(display[1])
+            except Exception:
+                pass  # cosmetic — rumps internals may shift
 
     # -- error visibility ----------------------------------------------------
 
@@ -113,7 +148,8 @@ class DesktopHelperMenuBar(rumps.App):
             return
         self.dispatcher = dispatcher
         hotkey_live = self._hotkeys is not None and self._hotkeys.ok
-        hotkey_hint = f"  ({self.hotkey_combo})" if hotkey_live else ""
+        speak_combo = (self.config.get("keybinds") or {}).get("speak") or self.hotkey_combo
+        hotkey_hint = f"  ({speak_combo})" if hotkey_live else ""
         self._ready_status = f"Ready on {device.type}{hotkey_hint}"
         self._on_main(self._set_status, TITLE_READY, self._ready_status)
         if self.transcriber is not None:
@@ -126,15 +162,32 @@ class DesktopHelperMenuBar(rumps.App):
     def _start_hotkey(self) -> None:
         try:
             from src.menubar.hotkey import HotkeyListener, parse_combo
-            keycode, flags = parse_combo(self.hotkey_combo)
-            # voice on: hotkey toggles listening; voice off: hotkey opens the prompt
-            action = self._toggle_voice if self.voice_enabled else self._ask_clicked
-            # fires on the tap thread → hop to the main thread
-            self._hotkeys = HotkeyListener(keycode, flags,
-                                           lambda: self._on_main(action, None))
-            self._hotkeys.start()
+            actions = {
+                "speak": self._toggle_voice if self.voice_enabled else self._ask_clicked,
+                "ask": self._ask_clicked,
+                "briefing": self._briefing_clicked,
+            }
+            keybinds = dict(self.config.get("keybinds") or {})
+            if not keybinds:
+                # legacy single "hotkey" → speak (or ask when voice is off)
+                keybinds["speak"] = self.hotkey_combo
+            bindings = []
+            for name, combo in keybinds.items():
+                action = actions.get(name)
+                if not combo or action is None:
+                    continue
+                try:
+                    keycode, flags = parse_combo(combo)
+                except ValueError:
+                    continue  # bad combo in config — skip it, don't die
+                # fires on the tap thread → hop to the main thread
+                bindings.append((keycode, flags,
+                                 lambda a=action: self._on_main(a, None)))
+            self._hotkeys = HotkeyListener(bindings) if bindings else None
+            if self._hotkeys is not None:
+                self._hotkeys.start()
         except Exception:
-            # unparseable combo etc. — the menu items still work
+            # tap setup failure — the menu items still work
             self._hotkeys = None
 
     # -- ask flow (main thread) ---------------------------------------------
@@ -173,6 +226,70 @@ class DesktopHelperMenuBar(rumps.App):
             settings.save(self.config)
         except Exception:
             pass  # toggle still applies for this session
+
+    # -- wake word -----------------------------------------------------------
+
+    def _start_wake(self) -> None:
+        if self._wake is None:
+            from src.voice import voice as voice_mod
+            from src.voice.wakeword import WakeWordListener
+            self._wake = WakeWordListener(
+                on_wake=lambda: self._on_main(self._wake_triggered),
+                # never trigger on our own say voice, mid-turn, or while the
+                # push-to-talk recorder owns the conversation
+                gate=lambda: (self.busy or voice_mod.is_speaking()
+                              or (self.recorder is not None and self.recorder.recording)),
+            )
+            self._wake.start()
+        else:
+            self._wake.resume()
+
+    def _toggle_wake(self, sender) -> None:
+        self.wake_enabled = not self.wake_enabled
+        sender.state = 1 if self.wake_enabled else 0
+        self.config.setdefault("features", {})["wake_word"] = self.wake_enabled
+        try:
+            settings.save(self.config)
+        except Exception:
+            pass
+        if self.wake_enabled:
+            self._start_wake()
+        elif self._wake is not None:
+            self._wake.pause()
+
+    def _wake_triggered(self) -> None:
+        """Main thread — the wake phrase was heard."""
+        if self.busy or self.dispatcher is None or \
+                (self.recorder is not None and self.recorder.recording):
+            return
+        from src.voice import wakeword
+        wakeword.chirp()
+        self.busy = True
+        self.title = TITLE_LISTENING
+        self.status_item.title = "Listening… (speak now)"
+        self._get_panel().set_action_state("Speak", True, "🎤 …")
+        if self._wake is not None:
+            self._wake.pause()
+        threading.Thread(target=self._wake_capture, daemon=True).start()
+
+    def _wake_capture(self) -> None:
+        """Worker: record until silence, then the normal voice pipeline."""
+        from src.voice import wakeword
+        try:
+            audio = wakeword.capture_until_silence()
+        except Exception as exc:
+            self._on_main(self._show_reply, "Voice", f"Capture failed: {exc}")
+            return
+        finally:
+            if self._wake is not None and self.wake_enabled:
+                self._wake.resume()
+        self._on_main(self._wake_capture_done)
+        self._transcribe_and_respond(audio)
+
+    def _wake_capture_done(self) -> None:
+        self.title = TITLE_THINKING
+        self.status_item.title = "Transcribing…"
+        self._get_panel().set_action_state("Speak", False)
 
     # -- briefing ------------------------------------------------------------
 
