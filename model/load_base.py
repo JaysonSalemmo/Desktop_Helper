@@ -38,12 +38,19 @@ def transplant(output_path: str) -> DesktopHelperLM:
     tokenizer.save()  # → model/hf_tokenizer/, committed to git
 
     print(f"Downloading {BASE_MODEL_ID} (~3.4GB)...")
-    base = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, torch_dtype=torch.float32)
+    # bf16 everywhere: Colab VMs have only ~12.7GB system RAM, and fp32
+    # assembly (2 × 6.8GB models + copies) gets OOM-killed there (observed
+    # 2026-07-19). bf16 is also the model's native dtype and what we serve.
+    base = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, dtype=torch.bfloat16)
     src = base.state_dict()
 
-    print("Building DesktopHelperLM...")
+    print("Building DesktopHelperLM (bf16)...")
     config = ModelConfig.from_tokenizer(tokenizer)
-    model = DesktopHelperLM(config)
+    torch.set_default_dtype(torch.bfloat16)  # model born bf16 — no fp32 spike
+    try:
+        model = DesktopHelperLM(config)
+    finally:
+        torch.set_default_dtype(torch.float32)
     dst = model.state_dict()
 
     print("Transplanting weights...")
@@ -54,7 +61,7 @@ def transplant(output_path: str) -> DesktopHelperLM:
     n_base = pretrained.shape[0]
     emb = dst["token_emb.weight"]
     emb[:n_base] = pretrained.clone()
-    mean_emb = pretrained.mean(dim=0)
+    mean_emb = pretrained.float().mean(dim=0).to(pretrained.dtype)
     for row in range(n_base, config.vocab_size):
         emb[row] = mean_emb + torch.randn_like(mean_emb) * 0.02
     # lm_head is tied to token_emb — nothing separate to copy

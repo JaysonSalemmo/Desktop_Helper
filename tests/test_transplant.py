@@ -40,7 +40,8 @@ def our_model():
     model.load_state_dict(ckpt["model_state_dict"])
     model.lm_head.weight = model.token_emb.weight
     model.eval()
-    return model
+    # checkpoint is bf16 (Colab RAM constraint); compute in fp32 for comparison
+    return model.float()
 
 
 def test_embedding_table_matches_tokenizer():
@@ -78,13 +79,19 @@ def test_logit_equivalence_with_reference(tokenizer, our_model):
         ref_logits = reference(x).logits            # (1, T, 49152)
         our_logits, _ = our_model(x)                # (1, T, 49163)
 
-    # compare over the shared vocabulary — our extra 11 rows are fresh
+    # compare over the shared vocabulary — our extra 11 rows are fresh.
+    # tolerance accounts for the checkpoint's bf16 rounding (~0.1-0.3 logit
+    # noise vs the fp32 reference); a wrong RoPE convention or eps produces
+    # diffs of 5+ with different argmaxes, so the separation stays clean
     ours = our_logits[..., : ref_logits.shape[-1]]
     max_diff = (ours - ref_logits).abs().max().item()
-    assert torch.allclose(ours, ref_logits, atol=1e-3, rtol=1e-4), (
+    assert max_diff < 1.0, (
         f"logits diverge from reference (max abs diff {max_diff:.2e}) — "
         "suspect RoPE convention, rms_norm_eps, or weight mapping"
     )
+    # every position must agree on the most likely next token
+    agree = (ours.argmax(-1) == ref_logits.argmax(-1)).float().mean().item()
+    assert agree == 1.0, f"argmax agreement only {agree:.1%}"
 
 
 @needs_checkpoint
