@@ -638,8 +638,43 @@ def _stocks() -> tuple[str, str]:
 # Public API
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# No-tool chat — routing contrast (run-6 backlog item, finally trained)
+# ---------------------------------------------------------------------------
+# greetings/thanks/small-talk must produce a PLAIN reply with no [CALL] token.
+# in the OPT era these were handled by a decoding-time confidence gate because
+# the model half-wanted spotify on "Hello." — now the contrast is in the data.
+
+_CHAT_EXAMPLES = [
+    (["Hello!", "Hello.", "Hi!", "Hi there!", "Hey!", "hey", "Yo!", "Hello Desktop Helper",
+      "Good morning!", "Good morning", "Good afternoon!", "Good evening!"],
+     ["Hey! What can I do for you?",
+      "Hi! Need your calendar, the weather, or some music?",
+      "Hello! How can I help?",
+      "Hey there — what do you need?"]),
+    (["Thanks!", "Thank you!", "Thanks so much!", "thx", "Appreciate it!", "Perfect, thanks."],
+     ["Anytime!", "You're welcome!", "Happy to help!", "Of course!"]),
+    (["How are you?", "How's it going?", "What's up?", "How are you doing today?"],
+     ["Doing great — ready to help. What do you need?",
+      "All good here! What can I do for you?"]),
+    (["What can you do?", "What are you able to do?", "Help", "What do you do?",
+      "Who are you?", "What are you?"],
+     ["I'm your desktop assistant — I can check your calendar, reminders, weather, "
+      "news, and stocks, read your notes, describe your screen, and play music on Spotify.",
+      "I can manage your calendar and reminders, fetch weather, news, and stock prices, "
+      "read notes, describe your screen, and control Spotify."]),
+    (["Goodbye!", "Bye!", "See you later!", "Good night!", "gtg, bye"],
+     ["See you later!", "Bye! I'll be here.", "Good night!"]),
+]
+
+
+def _chat() -> tuple[str, str]:
+    prompts, replies = random.choice(_CHAT_EXAMPLES)
+    return random.choice(prompts), random.choice(replies)
+
+
 _BUILDERS = [_calendar, _screen, _reminders, _notes, _spotify,
-             _launcher, _weather, _news, _stocks]
+             _launcher, _weather, _news, _stocks, _chat]
 
 
 def generate(count: int, seed: int | None = None) -> list[dict]:

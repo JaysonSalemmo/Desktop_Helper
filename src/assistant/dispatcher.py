@@ -88,8 +88,12 @@ class ToolDispatcher:
         # becomes plain chat.
         self.route_confidence = route_confidence
         self.memory = memory
-        self._tool_ids = {i for i in range(100)
-                          if tokenizer.is_tool_call(i) is not None}
+        # built from the tool-token registry, NOT by scanning an id range —
+        # in the SmolLM2 tokenizer the tool ids live at 49152+, and the old
+        # range(100) scan would silently find none (disabling the gate's
+        # tool-token masking without any error)
+        from model.tokenizer import TOOL_TOKENS
+        self._tool_ids = {tokenizer.tool_token_id(name) for name in TOOL_TOKENS}
 
     def _next_token(self, seq: list[int], greedy: bool = False,
                     boost_ids: set[int] | None = None,
@@ -148,8 +152,11 @@ class ToolDispatcher:
         return result
 
     def _respond(self, message: str) -> DispatchResult:
-        # prime with the training format: <bos> prompt \n
-        seq = [self.tok.bos_id] + self.tok.encode(f"{message}\n")
+        # ChatML priming via the shared format module — the first generated
+        # token (the routing decision) lands exactly after "assistant\n",
+        # identically to how every training example was framed
+        from model import chat_format
+        seq = chat_format.prime_ids(self.tok, message)
         response_start = len(seq)  # where the final reply begins (updated after a tool call)
         tool_used: str | None = None
         tool_result: str | None = None

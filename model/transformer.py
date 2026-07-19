@@ -1,135 +1,190 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from model.config import ModelConfig
 
 
+class RMSNorm(nn.Module):
+    # modern replacement for LayerNorm (used by Llama, SmolLM2, Qwen...).
+    # LayerNorm subtracts the mean and divides by the standard deviation;
+    # RMSNorm skips the mean subtraction and just divides by the root mean
+    # square, then scales by a learned weight. Simpler, slightly faster, and
+    # empirically just as good — and it has no bias term at all.
+
+    def __init__(self, dim: int, eps: float):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # compute in float32 for numerical stability (matters in bf16 training),
+        # then cast back to the input dtype — same as HF's LlamaRMSNorm.
+        dtype = x.dtype
+        x = x.float()
+        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return (self.weight * x.to(dtype))
+
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    # RoPE helper. CRITICAL: this is the HF/Llama "split-half" convention —
+    # the rotation pairs dimension i with dimension i + head_dim/2.
+    # The original RoPE paper pairs (2i, 2i+1) instead ("interleaved").
+    # The pretrained Q/K weights were trained under THIS convention; using the
+    # interleaved one produces plausible-but-wrong attention — silent
+    # corruption that only a logit-equivalence test catches.
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2:]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+class RotaryEmbedding(nn.Module):
+    # rotary position embeddings (RoPE): instead of ADDING a learned position
+    # vector to the token embedding (what GPT-2/OPT did), RoPE ROTATES each
+    # query/key vector by an angle proportional to its position. relative
+    # offsets between tokens then fall out of the dot product naturally.
+    # there are no learned weights — position information is pure geometry.
+
+    def __init__(self, head_dim: int, rope_theta: float):
+        super().__init__()
+        # each pair of dims rotates at its own frequency: low dims spin fast
+        # (fine-grained local order), high dims spin slowly (long-range order)
+        inv_freq = 1.0 / (
+            rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def forward(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # positions: (T,) → cos/sin: (T, head_dim)
+        freqs = positions.float()[:, None] * self.inv_freq[None, :]
+        emb = torch.cat((freqs, freqs), dim=-1)  # duplicated to cover both halves
+        return emb.cos(), emb.sin()
+
+
+def apply_rotary_pos_emb(
+    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # q, k: (B, n_heads, T, head_dim); cos/sin: (T, head_dim) → broadcast
+    cos = cos.to(q.dtype)
+    sin = sin.to(q.dtype)
+    q_rot = (q * cos) + (rotate_half(q) * sin)
+    k_rot = (k * cos) + (rotate_half(k) * sin)
+    return q_rot, k_rot
+
+
 class CausalSelfAttention(nn.Module):
-    # attention lets every token "look at" every other token and decide
-    # how much to borrow from each one. "causal" means a token can only
-    # look backwards in time — it cannot see tokens that come after it.
-    # this is enforced by a mask so the model can't cheat during training.
-    #
-    # "multi-head" means we do this in parallel n_heads times, each head
-    # looking for different kinds of relationships (syntax, semantics, etc).
+    # attention lets every token "look at" every other token and decide how
+    # much to borrow from each one. "causal" = a token can only look backwards.
+    # position information enters HERE via RoPE (rotating q and k) rather than
+    # being baked into the embeddings like the old architecture did.
 
     def __init__(self, config: ModelConfig):
         super().__init__()
         assert config.d_model % config.n_heads == 0, "d_model must be divisible by n_heads"
 
         self.n_heads = config.n_heads
-        self.d_head = config.d_model // config.n_heads  # dimensions per head
+        self.d_head = config.d_model // config.n_heads
         self.d_model = config.d_model
         self.dropout = config.dropout
 
-        # one projection that produces queries, keys, and values all at once.
-        # splitting into 3 separate linears would give the same result but this is faster.
+        # one projection producing queries, keys, and values all at once.
+        # SmolLM2 stores q/k/v as separate matrices; the transplant script
+        # concatenates them into this fused weight (valid because all three
+        # are the same size under plain multi-head attention).
         self.qkv = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
-
-        # mixes the outputs of all heads back into a single d_model vector
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
 
+        self.rope = RotaryEmbedding(self.d_head, config.rope_theta)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, C = x.shape  # batch, sequence length, d_model
+        B, T, C = x.shape
 
-        # project to queries, keys, values and split along the last dim
         q, k, v = self.qkv(x).split(C, dim=2)
-
-        # reshape so each head gets its own slice: (B, n_heads, T, d_head)
         q = q.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         k = k.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         v = v.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
 
-        # scaled dot-product attention with flash attention under the hood.
-        # is_causal=True applies the look-ahead mask so token i can't see token i+1.
+        # rotate q and k by their positions — this is all of RoPE
+        cos, sin = self.rope(torch.arange(T, device=x.device))
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
         dropout_p = self.dropout if self.training else 0.0
         y = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=True)
 
-        # merge all heads back into (B, T, d_model) and project
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(y)
 
 
-class MLP(nn.Module):
-    # the feed-forward sublayer. applied independently to each token position
-    # after attention. this is where most of the model's "knowledge" is stored —
-    # attention moves information around, mlp processes it.
-    #
-    # structure: d_model → d_ff → d_model (expand then contract)
+class SwiGLU(nn.Module):
+    # the modern feed-forward sublayer (Llama-family). instead of one linear
+    # + GELU, two parallel projections are computed from the same input:
+    #   gate — passed through SiLU (the "switch")
+    #   up   — the actual content
+    # multiplied elementwise, then projected back down. the gate learns which
+    # features to let through — a smarter nonlinearity for the same FLOPs.
 
     def __init__(self, config: ModelConfig):
         super().__init__()
-        self.fc1 = nn.Linear(config.d_model, config.d_ff, bias=False)   # expand
-        self.fc2 = nn.Linear(config.d_ff, config.d_model, bias=False)   # contract
-        self.drop = nn.Dropout(config.dropout)
+        self.gate_proj = nn.Linear(config.d_model, config.d_ff, bias=False)
+        self.up_proj = nn.Linear(config.d_model, config.d_ff, bias=False)
+        self.down_proj = nn.Linear(config.d_ff, config.d_model, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # gelu is a smooth approximation of relu — slightly better in practice
-        # for language models. dropout applied after the second linear.
-        return self.drop(self.fc2(F.gelu(self.fc1(x))))
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 
 class TransformerBlock(nn.Module):
-    # one full transformer layer: attention then feed-forward.
-    # we use "pre-norm" style — layernorm is applied before each sublayer,
-    # not after. this trains more stably than the original post-norm design.
-    #
-    # residual connections (x = x + sublayer(x)) let gradients flow directly
-    # back through the network during training, preventing vanishing gradients.
+    # one full transformer layer: attention then feed-forward, pre-norm style
+    # (normalize before each sublayer), residual connections throughout.
+    # same skeleton as the old architecture — only the parts changed:
+    # LayerNorm → RMSNorm, GELU MLP → SwiGLU, positions → RoPE (in attention).
 
     def __init__(self, config: ModelConfig):
         super().__init__()
-        self.ln1 = nn.LayerNorm(config.d_model)   # norm before attention
+        self.ln1 = RMSNorm(config.d_model, config.rms_norm_eps)   # pre-attention norm
         self.attn = CausalSelfAttention(config)
-        self.ln2 = nn.LayerNorm(config.d_model)   # norm before mlp
-        self.mlp = MLP(config)
+        self.ln2 = RMSNorm(config.d_model, config.rms_norm_eps)   # pre-mlp norm
+        self.mlp = SwiGLU(config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x))   # attend, then add back to residual stream
-        x = x + self.mlp(self.ln2(x))    # process, then add back to residual stream
+        x = x + self.attn(self.ln1(x))
+        x = x + self.mlp(self.ln2(x))
         return x
 
 
 class DesktopHelperLM(nn.Module):
-    # the full language model. takes a sequence of token ids, returns logits
-    # (unnormalized scores) over the vocabulary for the next token at each position.
+    # the full language model. takes token ids, returns next-token logits.
     #
-    # structure:
-    #   token ids → embeddings + positional embeddings
-    #   → n_layers transformer blocks
-    #   → final layernorm
-    #   → linear projection to vocab_size (the "lm head")
+    #   token ids → embeddings (no positional embeddings — RoPE handles
+    #   position inside attention) → n_layers blocks → final RMSNorm →
+    #   lm head (tied to the embedding matrix)
 
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
 
-        # turns each token id into a learned d_model-dimensional vector
         self.token_emb = nn.Embedding(config.vocab_size, config.d_model)
-
-        # adds position information — the model has no built-in sense of order,
-        # so we learn a separate embedding for each position 0..context_len-1
-        self.pos_emb = nn.Embedding(config.context_len, config.d_model)
-
-        self.drop = nn.Dropout(config.dropout)
         self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layers)])
-        self.ln_f = nn.LayerNorm(config.d_model)  # final norm before the lm head
-
-        # projects from d_model back to vocab_size to get next-token scores
+        self.ln_f = RMSNorm(config.d_model, config.rms_norm_eps)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
-        # weight tying: share the token embedding matrix with the lm head.
-        # the intuition is that the "meaning" of a token should be the same
-        # whether we're encoding it as input or predicting it as output.
-        # also saves ~32m parameters.
+        # weight tying: the "meaning" of a token is the same whether encoding
+        # it as input or predicting it as output. SmolLM2 ties too
+        # (tie_word_embeddings=true), so the transplant stays consistent.
         self.lm_head.weight = self.token_emb.weight
+
+        # when True, recompute each block's activations during backward
+        # instead of storing them — trades ~30% speed for a large activation
+        # memory saving. enabled by train.py; irrelevant at inference.
+        self.gradient_checkpointing = False
 
         self.apply(self._init_weights)
 
     def _init_weights(self, module: nn.Module) -> None:
-        # small normal init is standard for transformers.
-        # std=0.02 keeps activations from exploding at the start of training.
+        # only matters for the 11 tool-token embedding rows and any layer the
+        # transplant doesn't cover — everything else is overwritten by
+        # pretrained weights in load_base.py.
         if isinstance(module, nn.Linear):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
@@ -145,22 +200,19 @@ class DesktopHelperLM(nn.Module):
             f"sequence length {T} exceeds context length {self.config.context_len}"
         )
 
-        # build position indices [0, 1, 2, ..., T-1] on the same device as the input
-        pos = torch.arange(T, device=idx.device)
-
-        # combine token meaning and position information
-        x = self.drop(self.token_emb(idx) + self.pos_emb(pos))
+        x = self.token_emb(idx)  # no positional add — RoPE lives in attention
 
         for block in self.blocks:
-            x = block(x)
+            if self.gradient_checkpointing and self.training:
+                x = checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
 
         x = self.ln_f(x)
-        logits = self.lm_head(x)  # shape: (B, T, vocab_size)
+        logits = self.lm_head(x)
 
-        # cross-entropy loss is only computed when training targets are provided
         loss = None
         if targets is not None:
-            # flatten to (B*T, vocab_size) vs (B*T,) for the loss function
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
 
         return logits, loss
@@ -179,28 +231,17 @@ class DesktopHelperLM(nn.Module):
         top_k: int | None = None,
         eos_id: int | None = None,
     ) -> torch.Tensor:
-        # autoregressively sample one token at a time.
-        # temperature > 1 = more random, temperature < 1 = more focused.
-        # top_k limits sampling to the k most likely tokens at each step.
-        # eos_id, if given, stops generation once every sequence in the batch
-        # has produced it — for batch size 1 (the normal chat case) this just
-        # means "stop as soon as the model says it's done".
-        #
-        # note: this does not stop on [CALL: tool] tokens. the phase 4 dispatcher
-        # will run its own token-by-token loop so it can pause, run the tool, and
-        # feed the result back in before continuing — this method is for plain
-        # text completion and quick testing.
+        # autoregressively sample one token at a time. no KV cache — the full
+        # sequence is re-processed every step. fine at 1024 context; a cache
+        # is the obvious optimization if 1.7B on MPS feels slow in practice.
         for _ in range(max_new_tokens):
-            # trim the context window if the sequence has grown too long
             idx_cond = idx[:, -self.config.context_len:]
             logits, _ = self(idx_cond)
 
-            # take only the last position's logits — that's the next token prediction
             logits = logits[:, -1, :] / temperature
 
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                # mask out everything below the kth highest score
                 logits[logits < v[:, [-1]]] = float("-inf")
 
             probs = F.softmax(logits, dim=-1)

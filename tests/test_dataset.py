@@ -28,11 +28,18 @@ def test_result_span_mask_no_result_block():
 
 
 def test_generator_examples_parse_and_roundtrip():
-    tok = DesktopHelperTokenizer.load("model/tokenizer.json")
+    tok = DesktopHelperTokenizer.load()
     examples = generate(300, seed=7)
     tools_seen = set()
+    chat_seen = 0
     for ex in examples:
-        assert ex["response"].startswith("[CALL: ")
+        if not ex["response"].startswith("[CALL: "):
+            # no-tool chat example: plain reply, no protocol tokens at all
+            chat_seen += 1
+            ids = tok.encode(ex["response"])
+            assert tok.result_start_id not in ids
+            assert all(tok.is_tool_call(i) is None for i in ids)
+            continue
         tool = ex["response"].split("]")[0].removeprefix("[CALL: ")
         tools_seen.add(tool)
         # every tool token must resolve; every result block must be delimited
@@ -41,6 +48,7 @@ def test_generator_examples_parse_and_roundtrip():
         assert ids.count(tok.result_start_id) == 1
         assert ids.count(tok.result_end_id) == 1
     assert len(tools_seen) == 9
+    assert chat_seen > 0  # the routing-contrast category must be present
 
 
 def test_generator_content_is_high_entropy():
@@ -48,6 +56,8 @@ def test_generator_content_is_high_entropy():
     # across two seeds and require near-uniqueness
     results = []
     for ex in generate(400, seed=11):
+        if "[RESULT]" not in ex["response"]:
+            continue  # chat examples have no result block
         result = ex["response"].split("[RESULT]")[1].split("[/RESULT]")[0]
         results.append(result)
     unique = len(set(results)) / len(results)

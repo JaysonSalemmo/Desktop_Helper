@@ -29,7 +29,7 @@ class ScriptedModel:
 
 
 def _tokenizer():
-    return DesktopHelperTokenizer.load("model/tokenizer.json")
+    return DesktopHelperTokenizer.load()  # committed model/hf_tokenizer/
 
 
 def _dispatcher(model, tok, handlers):
