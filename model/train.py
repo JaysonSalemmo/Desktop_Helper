@@ -139,6 +139,13 @@ def train(args) -> None:
                 _, loss = model(x, y)
                 loss = loss / args.grad_accum
 
+            # belt & braces vs the dataset-level filter: a non-finite loss
+            # must never reach backward() — one NaN gradient poisons every
+            # weight permanently and the rest of the run trains garbage
+            if not torch.isfinite(loss):
+                print(f"WARNING: non-finite loss at step {step}, skipping micro-batch")
+                continue
+
             loss.backward()
             running_loss += loss.item()
 

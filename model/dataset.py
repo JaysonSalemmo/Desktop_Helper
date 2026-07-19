@@ -78,11 +78,20 @@ class InstructDataset(Dataset):
         self.seq_lens: list[int] = []
         self.result_masks: list[torch.Tensor] = []
         target_len = context_len + 1
+        skipped = 0
         for ex in examples:
             ids, prompt_len = chat_format.example_ids(
                 tokenizer, ex["prompt"], ex["response"]
             )
             seq_len = min(len(ids), target_len)
+            # an example whose prompt fills (or overflows) the window has no
+            # trainable response targets left after masking — cross_entropy
+            # over zero targets is NaN, and at batch_size=1 a single such
+            # example poisons every weight in the model (found the hard way:
+            # Colab run 2026-07-19, loss went NaN mid-epoch). skip them.
+            if prompt_len >= seq_len - 1:
+                skipped += 1
+                continue
             if len(ids) >= target_len:
                 ids = ids[:target_len]
             else:
@@ -97,6 +106,9 @@ class InstructDataset(Dataset):
                 result_span_mask(ids, tokenizer.result_start_id, tokenizer.result_end_id),
                 dtype=torch.bool,
             ))
+        if skipped:
+            print(f"InstructDataset: skipped {skipped} examples with no trainable "
+                  f"targets (prompt fills the {context_len}-token window)")
 
     def __len__(self) -> int:
         return len(self.sequences)
