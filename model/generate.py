@@ -20,17 +20,29 @@ from model.transformer import DesktopHelperLM
 
 def load_model(checkpoint: str, device: torch.device) -> DesktopHelperLM:
     # weights_only=False: checkpoint stores a ModelConfig object (our own file).
-    ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
-    model = DesktopHelperLM(ckpt["config"]).to(device)
+    #
+    # ALWAYS assemble on CPU, then move: load_state_dict with MPS tensors on
+    # both sides silently corrupts weights when two full copies sit near the
+    # MPS memory ceiling (observed 2026-07-19: max diffs up to 6.0, no error
+    # raised — the model produced fluent-looking garbage). CPU assembly then a
+    # single .to(device) keeps only one accelerator-resident copy at any time.
+    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    model = DesktopHelperLM(ckpt["config"])
     model.load_state_dict(ckpt["model_state_dict"])
+    model.lm_head.weight = model.token_emb.weight  # re-tie after load
     model.eval()
-    return model
+    if device.type in ("mps", "cuda"):
+        # serve in bf16 on accelerators: half the memory, the model family's
+        # native dtype, and faster matmuls. CPU stays fp32 (bf16 is slow there).
+        return model.to(device=device, dtype=torch.bfloat16)
+    return model.to(device)
 
 
 def generate(model, tokenizer, prompt, device, max_new_tokens, temperature, top_k):
-    # match the training format: <bos> prompt \n  ...then let the model continue
-    # until it emits <eos>. training turns were <bos>prompt\nresponse<eos>.
-    ids = [tokenizer.bos_id] + tokenizer.encode(f"{prompt}\n")
+    # ChatML priming via the shared format module (same framing as training
+    # and the dispatcher); the model continues until <|im_end|>.
+    from model import chat_format
+    ids = chat_format.prime_ids(tokenizer, prompt)
     idx = torch.tensor([ids], dtype=torch.long, device=device)
 
     out = model.generate(
@@ -49,7 +61,7 @@ def generate(model, tokenizer, prompt, device, max_new_tokens, temperature, top_
 def main() -> None:
     parser = argparse.ArgumentParser(description="generate from a fine-tuned checkpoint")
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--tokenizer", default="model/tokenizer.json")
+    parser.add_argument("--tokenizer", default="model/hf_tokenizer")
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--max-new-tokens", type=int, default=100)
     parser.add_argument("--temperature", type=float, default=0.8)

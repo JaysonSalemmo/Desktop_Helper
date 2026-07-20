@@ -288,11 +288,12 @@ def build_fallback_router(config: dict | None = None) -> Handler:
     """Routes messages the model failed to route (no [CALL] emitted at all).
 
     Tool patterns are deliberately narrow: only ones we've *seen* the model
-    miss. The final "chat" catch-all exists because 350M free generation is
-    word salad — canned honesty beats fluent nonsense. Set
-    features.model_chat=true to let the model babble instead."""
+    miss. Unrouted chat goes to the model — SmolLM2 holds a real conversation
+    — except capability questions, which stay canned: asked what it can do,
+    the model invents its own feature list (Wikipedia, Apple Watch). Set
+    features.model_chat=false to canned-reply all unrouted chat instead."""
     features = (config or {}).get("features", {})
-    model_chat = features.get("model_chat", False)
+    model_chat = features.get("model_chat", True)
 
     def fallback(message: str) -> str | None:
         lower = message.lower()
@@ -311,6 +312,8 @@ def build_fallback_router(config: dict | None = None) -> Handler:
         # model treat it as a general question (argmax = text, no call)
         if "weather" in lower or "forecast" in lower or "temperature" in lower:
             return "weather"
+        if _is_capability_question(message):
+            return "chat"
         return None if model_chat else "chat"
     return fallback
 
@@ -331,9 +334,15 @@ def _is_greeting(message: str) -> bool:
                for g in _GREETINGS)
 
 
+def _is_capability_question(message: str) -> bool:
+    m = message.lower()
+    return ("what can you do" in m or "who are you" in m
+            or "what are you" in m or m.strip(" .!?") == "help")
+
+
 def make_chat_handler(config: dict) -> Handler:
-    """Canned small talk for unrouted messages — the model's free-form chat
-    is word salad at 350M, so honesty beats fluent nonsense."""
+    """Canned replies for messages the fallback router sends to "chat" —
+    capability questions always, everything unrouted when model_chat=false."""
     name = config.get("user", {}).get("name", "there")
 
     def chat_handler(message: str) -> str:
@@ -342,8 +351,7 @@ def make_chat_handler(config: dict) -> Handler:
             return f"Hey {name}! {_CAPABILITIES}"
         if "thank" in m:
             return "Anytime!"
-        if "what can you do" in m or "who are you" in m or "what are you" in m \
-                or m.strip(" .!?") == "help":
+        if _is_capability_question(message):
             return _CAPABILITIES
         return ("I'm not sure how to help with that one. "
                 f"{_CAPABILITIES}")

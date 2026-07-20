@@ -46,6 +46,6 @@
         "briefing": ""
     },
     "model": {
-        "checkpoint": "model/checkpoints/epoch_08.pt"
+        "checkpoint": "model/checkpoints/smol_run1_warm_epoch_02.pt"
     }
 }

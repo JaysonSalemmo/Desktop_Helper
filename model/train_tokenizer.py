@@ -1,3 +1,7 @@
+"""OPT-ERA ARTIFACT — the SmolLM2 era adopts the base model's
+tokenizer (model/tokenizer.py builds it); this from-scratch trainer is kept
+only for history. See docs/TIMELINE.md.
+"""
 """
 train the bpe tokenizer on a text corpus and save it to disk.
 run this once before training the model — the saved tokenizer.json

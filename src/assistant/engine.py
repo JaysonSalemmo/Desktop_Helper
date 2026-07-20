@@ -17,7 +17,7 @@ from src.assistant.dispatcher import ToolDispatcher
 from src.assistant.tools import build_fallback_router, build_handlers, build_verbatim
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-TOKENIZER_PATH = PROJECT_ROOT / "model" / "tokenizer.json"
+TOKENIZER_PATH = PROJECT_ROOT / "model" / "hf_tokenizer"
 
 
 class CheckpointMissing(FileNotFoundError):

@@ -65,7 +65,7 @@ CASES = [
 def main() -> None:
     parser = argparse.ArgumentParser(description="Score RESULT-copying faithfulness of a checkpoint")
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--tokenizer", default="model/tokenizer.json")
+    parser.add_argument("--tokenizer", default="model/hf_tokenizer")
     parser.add_argument("--copy-boost", type=float, default=2.0)
     parser.add_argument("--repetition-penalty", type=float, default=1.3)
     args = parser.parse_args()
