@@ -3,6 +3,7 @@ import math
 import torch
 
 from model import ModelConfig, DesktopHelperLM
+from model.transformer import KVCache
 
 
 def _tiny_config() -> ModelConfig:
@@ -68,3 +69,27 @@ def test_generate_stops_early_at_eos():
     # well before the 50-step cap, proving the loop actually breaks early
     out = model.generate(idx, max_new_tokens=50, temperature=1000.0, eos_id=1)
     assert out.shape[1] < 4 + 50
+
+
+def test_kv_cache_matches_full_forward():
+    # cached decoding must be a pure speedup: identical logits to feeding the
+    # whole sequence at once. exercises all three attention paths — prefill
+    # (is_causal), single-token step (no mask), and a multi-token chunk on an
+    # existing cache (the dispatcher's result injection → explicit mask, the
+    # branch where SDPA's top-left-aligned is_causal would silently be wrong)
+    torch.manual_seed(0)
+    config = _tiny_config()
+    model = DesktopHelperLM(config).eval()
+    ids = torch.randint(0, config.vocab_size, (1, 10))
+
+    with torch.no_grad():
+        full, _ = model(ids)
+
+        cache = KVCache(config.n_layers)
+        pieces = [model(ids[:, :4], cache=cache)[0]]        # prefill
+        for t in range(4, 7):                               # one-token steps
+            pieces.append(model(ids[:, t:t + 1], cache=cache)[0])
+        pieces.append(model(ids[:, 7:], cache=cache)[0])    # chunk on cache
+
+    assert cache.seq_len == 10
+    assert torch.allclose(full, torch.cat(pieces, dim=1), atol=1e-5)

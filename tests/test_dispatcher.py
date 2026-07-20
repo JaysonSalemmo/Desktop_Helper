@@ -15,12 +15,14 @@ class ScriptedModel:
         self.script = script
         self.i = 0
         self.vocab_size = vocab_size
-        self.config = SimpleNamespace(context_len=context_len)
+        self.config = SimpleNamespace(context_len=context_len, n_layers=1)
 
     def eval(self):
         return self
 
-    def __call__(self, idx):
+    def __call__(self, idx, cache=None):
+        # cache ignored — its seq_len stays 0 so the dispatcher feeds the full
+        # sequence every call, and these fakes only look at the call count
         logits = torch.full((1, idx.shape[1], self.vocab_size), -10.0)
         tok = self.script[min(self.i, len(self.script) - 1)]
         logits[0, -1, tok] = 10.0
@@ -78,12 +80,12 @@ class AfterCallModel:
         self.vocab_size = vocab_size
         self.later = later  # token id → logit; everything else 0
         self.first = True
-        self.config = SimpleNamespace(context_len=context_len)
+        self.config = SimpleNamespace(context_len=context_len, n_layers=1)
 
     def eval(self):
         return self
 
-    def __call__(self, idx):
+    def __call__(self, idx, cache=None):
         logits = torch.zeros((1, idx.shape[1], self.vocab_size))
         if self.first:
             logits[0, -1, :] = -10.0
@@ -166,12 +168,12 @@ class WeakToolModel:
         self.tool_id, self.text_id, self.eos_id = tool_id, text_id, eos_id
         self.vocab_size = vocab_size
         self.step = 0
-        self.config = SimpleNamespace(context_len=1024)
+        self.config = SimpleNamespace(context_len=1024, n_layers=1)
 
     def eval(self):
         return self
 
-    def __call__(self, idx):
+    def __call__(self, idx, cache=None):
         logits = torch.zeros((1, idx.shape[1], self.vocab_size))
         if self.step == 0:
             logits[0, -1, self.tool_id] = 1.0   # top, but prob ≈ tiny over 32k vocab
@@ -221,6 +223,9 @@ def test_fallback_router_rescues_unrouted_messages():
     result = d.respond("Play Passionfruit by Drake on Spotify")
     assert result.tool == "spotify"
     assert result.response == "Now playing: Passionfruit by Drake"
+    # early exit: one forward pass (the declined routing token), then straight
+    # to the tool — no full chat reply generated only to be discarded
+    assert model.i == 1
 
     # non-play chat stays plain text
     model2 = ScriptedModel([word, tok.eos_id], tok.vocab_size)

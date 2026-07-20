@@ -168,3 +168,11 @@ Watch). Capability questions stay canned; everything else is the model's.
 Checkpoint: `smol_run1_warm_epoch_02.pt` — main fine-tune + surgical warm
 start. Speed on MPS: ~2.3 tok/s (1.7B bf16, no KV cache) — the KV cache is
 the next era's first fight.
+
+**Postscript (same day):** it was a short fight. A per-layer KV cache (keys
+cached post-RoPE at absolute positions; explicit bottom-right causal mask for
+multi-token chunks on an existing cache, where SDPA's `is_causal` is silently
+wrong) took MPS decoding from 3.2 to **13.1 tok/s** — 4.1×, byte-identical
+output, faithfulness still 100% through the cached dispatcher. Bundled fix:
+fallback-routed tools exit right after the declined routing token instead of
+generating a full reply that was always discarded.

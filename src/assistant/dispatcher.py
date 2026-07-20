@@ -20,16 +20,21 @@ temperatures, invented reminders):
 - tokens already generated in the reply are penalised (`repetition_penalty`) —
   greedy decoding on this model loops without it.
 
-Measured honestly (2026-07-17, epoch_08): these make replies deterministic and
-slightly more likely to borrow real digits, but they cannot make this
-checkpoint faithful — it never learned to copy from RESULT context. The real
-fix is training-side (RESULT-masked loss + high-entropy result content).
+Measured honestly (2026-07-20, smol_run1_warm): the SmolLM2-era model copies
+natively — 98% faithfulness with both knobs off, 100% with the light defaults.
+The knobs are retained as cheap insurance, not as a crutch.
+
+Generation runs on a per-turn KV cache (model.transformer.KVCache): the prompt
+is prefilled once, each later step feeds only the newest token, and a result
+injection prefills its chunk in one forward pass.
 """
 from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+
+from model.transformer import KVCache
 
 
 @dataclass
@@ -97,13 +102,24 @@ class ToolDispatcher:
         from model.tokenizer import TOOL_TOKENS
         self._tool_ids = {tokenizer.tool_token_id(name) for name in TOOL_TOKENS}
 
-    def _next_token(self, seq: list[int], greedy: bool = False,
+    def _next_token(self, seq: list[int], cache: KVCache | None = None,
+                    greedy: bool = False,
                     boost_ids: set[int] | None = None,
                     penalize_ids: set[int] | None = None,
                     gate_tools: bool = False) -> int:
-        context = seq[-self.model.config.context_len:]
-        idx = torch.tensor([context], dtype=torch.long, device=self.device)
-        logits, _ = self.model(idx)
+        if cache is not None and len(seq) <= self.model.config.context_len:
+            # feed only what the cache hasn't seen — one token on a normal
+            # step, the whole injected chunk right after a tool result
+            idx = torch.tensor([seq[cache.seq_len:]], dtype=torch.long,
+                               device=self.device)
+            logits, _ = self.model(idx, cache=cache)
+        else:
+            # overflow (or no cache): the pre-cache windowed path. the trimmed
+            # window restarts positions at 0, so the cache can't serve it —
+            # and seq only grows, so once here, every later step is here too.
+            context = seq[-self.model.config.context_len:]
+            idx = torch.tensor([context], dtype=torch.long, device=self.device)
+            logits, _ = self.model(idx)
         logits = logits[0, -1, :]
         if gate_tools:
             top = int(torch.argmax(logits))
@@ -164,16 +180,35 @@ class ToolDispatcher:
         tool_result: str | None = None
         result_ids: set[int] = set()  # injected result tokens → copy-bias targets
         reply_ids: set[int] = set()   # reply tokens so far → repetition-penalty targets
+        cache = KVCache(self.model.config.n_layers)  # per-turn — never shared
 
         for step in range(self.max_new_tokens):
             # the first token is the routing decision — greedy, so the same
             # question always reaches the same tool (sampling made routing
             # flaky on marginal phrasings). Post-injection stays greedy too;
             # sampling only shapes the middle of no-tool chat replies.
-            next_id = self._next_token(seq, greedy=step == 0 or tool_used is not None,
+            next_id = self._next_token(seq, cache=cache,
+                                       greedy=step == 0 or tool_used is not None,
                                        boost_ids=result_ids, penalize_ids=reply_ids,
                                        gate_tools=step == 0)
             tool = self.tok.is_tool_call(next_id)
+
+            if step == 0 and tool is None and self.fallback_router is not None:
+                # the model declined to route on its routing token. if the
+                # keyword net catches the message, run the tool NOW — before
+                # the cache work, a full chat reply was generated here only to
+                # be discarded. (a model that would have emitted a mid-reply
+                # call loses that chance, but the fallback patterns are narrow
+                # and training always puts the call first.)
+                routed = self.fallback_router(message)
+                if routed is not None:
+                    tool_result = self._run_tool(routed, message)
+                    template = self.verbatim.get(routed)
+                    # no template → return the raw result; the model already
+                    # declined to route, so it doesn't get to wrap this one
+                    response = template(tool_result) if template else tool_result
+                    return DispatchResult(response=response, tool=routed,
+                                          tool_result=tool_result)
 
             if tool is not None and tool_used is None:
                 # intercept: keep the [CALL: tool] token, then inject the *real* result
@@ -199,17 +234,6 @@ class ToolDispatcher:
             seq.append(next_id)
             if tool_used is not None:
                 reply_ids.add(next_id)
-
-        if tool_used is None and self.fallback_router is not None:
-            tool = self.fallback_router(message)
-            if tool is not None:
-                tool_result = self._run_tool(tool, message)
-                template = self.verbatim.get(tool)
-                # no template → return the raw result; the model already
-                # declined to route, so it doesn't get to wrap this one
-                response = template(tool_result) if template else tool_result
-                return DispatchResult(response=response, tool=tool,
-                                      tool_result=tool_result)
 
         response = self.tok.decode(seq[response_start:], skip_special=True).strip()
         return DispatchResult(response=response, tool=tool_used, tool_result=tool_result)

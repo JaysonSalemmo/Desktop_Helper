@@ -73,6 +73,34 @@ def apply_rotary_pos_emb(
     return q_rot, k_rot
 
 
+class KVCache:
+    # generation bottleneck fix: without a cache, emitting token N re-runs
+    # attention over all N-1 previous tokens in every layer, so a T-token reply
+    # costs O(T²) forward work. The keys/values of past tokens never change
+    # (causal attention — nothing behind you can see you), so we store each
+    # layer's rotated k/v once and each new step only computes its own q/k/v.
+    # Not an nn.Module: no weights, just per-turn scratch state.
+
+    def __init__(self, n_layers: int):
+        self.layers: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * n_layers
+
+    @property
+    def seq_len(self) -> int:
+        entry = self.layers[0]
+        return 0 if entry is None else entry[0].shape[2]
+
+    def update(
+        self, layer: int, k: torch.Tensor, v: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # append this step's k/v to the layer's cache, return the full history
+        entry = self.layers[layer]
+        if entry is not None:
+            k = torch.cat((entry[0], k), dim=2)
+            v = torch.cat((entry[1], v), dim=2)
+        self.layers[layer] = (k, v)
+        return k, v
+
+
 class CausalSelfAttention(nn.Module):
     # attention lets every token "look at" every other token and decide how
     # much to borrow from each one. "causal" = a token can only look backwards.
@@ -97,7 +125,17 @@ class CausalSelfAttention(nn.Module):
 
         self.rope = RotaryEmbedding(self.d_head, config.rope_theta)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        cache: KVCache | None = None,
+        layer: int = 0,
+        past: int = 0,
+    ) -> torch.Tensor:
+        # `past` (cache length BEFORE this chunk) comes from the caller — it
+        # can't be read off the cache here, because earlier layers have
+        # already appended this chunk to their entries by the time later
+        # layers run.
         B, T, C = x.shape
 
         q, k, v = self.qkv(x).split(C, dim=2)
@@ -105,12 +143,31 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         v = v.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
 
-        # rotate q and k by their positions — this is all of RoPE
-        cos, sin = self.rope(torch.arange(T, device=x.device))
+        # rotate q and k by their ABSOLUTE positions — with a cache, this
+        # chunk starts at position past, not 0. Keys are cached post-rotation,
+        # so each token is rotated exactly once, at its true position.
+        cos, sin = self.rope(torch.arange(past, past + T, device=x.device))
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
+        if cache is not None:
+            k, v = cache.update(layer, k, v)
+
         dropout_p = self.dropout if self.training else 0.0
-        y = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=True)
+        if past == 0:
+            y = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p,
+                                               is_causal=T > 1)
+        elif T == 1:
+            # one new query attending to the whole cache — no mask needed
+            y = F.scaled_dot_product_attention(q, k, v)
+        else:
+            # multi-token chunk on top of an existing cache (the dispatcher's
+            # result injection). SDPA's is_causal aligns the diagonal top-left
+            # (query i sees keys ≤ i), but here query i sits at absolute
+            # position past+i — build the bottom-right-aligned mask explicitly.
+            S = past + T
+            mask = (torch.arange(S, device=x.device)[None, :]
+                    <= (past + torch.arange(T, device=x.device))[:, None])
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(y)
@@ -147,8 +204,14 @@ class TransformerBlock(nn.Module):
         self.ln2 = RMSNorm(config.d_model, config.rms_norm_eps)   # pre-mlp norm
         self.mlp = SwiGLU(config)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x))
+    def forward(
+        self,
+        x: torch.Tensor,
+        cache: KVCache | None = None,
+        layer: int = 0,
+        past: int = 0,
+    ) -> torch.Tensor:
+        x = x + self.attn(self.ln1(x), cache=cache, layer=layer, past=past)
         x = x + self.mlp(self.ln2(x))
         return x
 
@@ -193,20 +256,24 @@ class DesktopHelperLM(nn.Module):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(
-        self, idx: torch.Tensor, targets: torch.Tensor | None = None
+        self,
+        idx: torch.Tensor,
+        targets: torch.Tensor | None = None,
+        cache: KVCache | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         B, T = idx.shape
-        assert T <= self.config.context_len, (
-            f"sequence length {T} exceeds context length {self.config.context_len}"
+        past = cache.seq_len if cache is not None else 0
+        assert past + T <= self.config.context_len, (
+            f"sequence length {past + T} exceeds context length {self.config.context_len}"
         )
 
         x = self.token_emb(idx)  # no positional add — RoPE lives in attention
 
-        for block in self.blocks:
+        for i, block in enumerate(self.blocks):
             if self.gradient_checkpointing and self.training:
                 x = checkpoint(block, x, use_reentrant=False)
             else:
-                x = block(x)
+                x = block(x, cache=cache, layer=i, past=past)
 
         x = self.ln_f(x)
         logits = self.lm_head(x)
@@ -231,12 +298,21 @@ class DesktopHelperLM(nn.Module):
         top_k: int | None = None,
         eos_id: int | None = None,
     ) -> torch.Tensor:
-        # autoregressively sample one token at a time. no KV cache — the full
-        # sequence is re-processed every step. fine at 1024 context; a cache
-        # is the obvious optimization if 1.7B on MPS feels slow in practice.
+        # autoregressively sample one token at a time. the KV cache prefills
+        # the prompt once, then each step feeds only the newest token. if the
+        # sequence outgrows context_len we drop the cache and fall back to
+        # windowed re-processing — the trimmed window restarts RoPE positions
+        # at 0, which a cache built at absolute positions can't serve.
+        cache: KVCache | None = KVCache(self.config.n_layers)
+        new_tokens = idx
         for _ in range(max_new_tokens):
-            idx_cond = idx[:, -self.config.context_len:]
-            logits, _ = self(idx_cond)
+            if cache is not None and \
+                    cache.seq_len + new_tokens.shape[1] > self.config.context_len:
+                cache = None
+            if cache is not None:
+                logits, _ = self(new_tokens, cache=cache)
+            else:
+                logits, _ = self(idx[:, -self.config.context_len:])
 
             logits = logits[:, -1, :] / temperature
 
@@ -247,6 +323,7 @@ class DesktopHelperLM(nn.Module):
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, idx_next), dim=1)
+            new_tokens = idx_next
 
             if eos_id is not None and (idx_next == eos_id).all():
                 break
