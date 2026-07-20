@@ -210,12 +210,16 @@ def test_fallback_router_covers_weather_and_spotify():
     assert fallback("How is the weather today in New York?") == "weather"
     assert fallback("What's the temperature outside right now?") == "weather"
     assert fallback("Play Passionfruit by Drake on Spotify") == "spotify"
-    # unrouted chat → canned handler, never 350M word salad
-    assert fallback("Hello there!") == "chat"
-    assert fallback("Tell me a joke") == "chat"
-    # …unless the model_chat flag opts back into free generation
-    salad = build_fallback_router({"features": {"model_chat": True}})
-    assert salad("Hello there!") is None
+    # unrouted chat → the model, which holds a real conversation now
+    assert fallback("Hello there!") is None
+    assert fallback("Tell me a joke") is None
+    # …but capability questions stay canned: the model invents features
+    assert fallback("What can you do?") == "chat"
+    assert fallback("help") == "chat"
+    # model_chat=false opts all unrouted chat back into canned replies
+    canned = build_fallback_router({"features": {"model_chat": False}})
+    assert canned("Hello there!") == "chat"
+    assert canned("What can you do?") == "chat"
 
 
 def test_chat_handler_canned_replies():

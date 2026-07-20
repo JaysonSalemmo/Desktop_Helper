@@ -123,3 +123,48 @@ run to discover.
 
 The `opt-350m` branch preserves Era 1–3 exactly as they ended;
 `run5_epoch16.pt` remains the era's final artifact.
+
+## Era 5 — The warm start, and the cutover (2026-07-19 → 07-20)
+
+**Run 1** (3 epochs, uniform 2e-5, Dolly + tool calls): the era's core goal —
+kill the word salad — achieved immediately. Chat became genuinely
+conversational ("Hey there — what do you need?"), and held-out Dolly loss
+*fell* every epoch (1.336→1.268): zero catastrophic forgetting, the
+instruction-tuned base preserved by design. But faithfulness eval read **0%**
+— the model never emitted a `[CALL]` token. A first-token probe showed the
+routing circuit *sprouting* (correct tool often argmax, at ~2–4%
+probability) but nowhere near usable confidence. Diagnosis: the 11
+from-scratch tool-token rows — the only random-init params — undertrained at
+the deliberately-gentle LR. Era 1's original sin, shrunk 3000× but not gone.
+
+**The fix — embeddings-only warm start** (`train.py --embeddings-only`):
+freeze everything, gradient-mask all embedding rows except the 11 tool rows,
+train only those at 1e-3 on tool-call data. The tied lm_head means the output
+logit rows train too — exactly the circuit that must fire. Forgetting is
+impossible *by construction*, and a unit test asserts pretrained rows and
+blocks stay bit-identical. (Gotcha the test caught: AdamW's decoupled weight
+decay moves every param in the group regardless of gradient — masked rows
+were shrinking; this mode runs weight_decay=0.)
+
+**Result of a ~40-minute L4 run:** 93% faithfulness, 13/14 routing, and
+**byte-perfect proper nouns** — "Pottery workshop at 4:35pm, and Dinner with
+Wojciech at 8pm", exact. The OPT era's white whale (letter-level blending,
+"Wofciech") is dead. Chat untouched, frozen by construction.
+
+**The cutover (07-20):** gate re-measured — every routing prompt fires at
+p=0.73–0.999, chat never argmaxes a tool; the old 0.9 gate (calibrated for
+OPT) was itself the missing 7%, so `route_confidence` → 0.6 → **eval 100%**.
+Decoding knobs re-swept: 98% with *zero* assistance (the model copies
+natively now); defaults settled at copy_boost 2.0 / repetition_penalty 1.1.
+The verbatim templates stay — 100% is still better than 99.9% for calendars —
+but they're now belt-and-suspenders, not load-bearing.
+
+**Chat policy inverted:** Era 3 retired free chat to canned replies
+("Ojomala Adar…"); Era 5 retires the canned replies. Unrouted chat now goes
+to the model — with one carve-out, found in live testing: asked "What can you
+do?", the model fluently *invents* its own feature list (Wikipedia, Apple
+Watch). Capability questions stay canned; everything else is the model's.
+
+Checkpoint: `smol_run1_warm_epoch_02.pt` — main fine-tune + surgical warm
+start. Speed on MPS: ~2.3 tok/s (1.7B bf16, no KV cache) — the KV cache is
+the next era's first fight.

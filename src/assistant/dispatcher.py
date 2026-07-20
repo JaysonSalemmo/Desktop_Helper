@@ -53,14 +53,14 @@ class ToolDispatcher:
         max_new_tokens: int = 120,
         temperature: float = 0.7,
         top_k: int | None = 40,
-        copy_boost: float = 8.0,  # re-sweep per checkpoint — the optimum rises as the
-                                  # copy circuit strengthens (run-3 epoch_08 → 4,
-                                  # run-4 epoch_12 → 8 under the decaying scheme).
-                                  # Higher scores the eval but degrades glue (Goodhart).
-        repetition_penalty: float = 1.3,
+        copy_boost: float = 2.0,  # SmolLM2-era re-sweep (2026-07-20): this model copies
+                                  # NATIVELY — 98% faithfulness at boost 0, 100% at boost 2.
+                                  # The OPT era needed boost 8 to reach 88%; that aggression
+                                  # now just risks Goodhart glue. Light touch is enough.
+        repetition_penalty: float = 1.1,
         verbatim: "dict[str, Callable[[str], str]] | None" = None,
         fallback_router: "Callable[[str], str | None] | None" = None,
-        route_confidence: float = 0.9,
+        route_confidence: float = 0.6,
         memory=None,  # optional ChromaMemory — records every completed exchange
     ):
         self.model = model.eval()
@@ -82,10 +82,12 @@ class ToolDispatcher:
         # produced gibberish chat instead of routing)
         self.fallback_router = fallback_router
         # a tool call is only accepted if the model is at least this sure.
-        # Measured on epoch_16: genuine tool prompts route at p≈1.000, chat
-        # tops out at p≈0.68 ("Hello." wanted spotify at p=0.13) — 0.9 splits
-        # them cleanly. Below the gate, tool tokens are masked and the turn
-        # becomes plain chat.
+        # Re-measured on smol_run1_warm (2026-07-20): genuine tool prompts
+        # route at p=0.73-0.999 (min: "What's playing on Spotify?" 0.734,
+        # "Check my reminders." 0.786 — the old 0.9 gate wrongly blocked
+        # both); chat prompts never have a tool as top token at all. 0.6
+        # clears every real route with margin while still blocking the
+        # flat-mush regime (p≈0.02-0.04) seen in undertrained checkpoints.
         self.route_confidence = route_confidence
         self.memory = memory
         # built from the tool-token registry, NOT by scanning an id range —
