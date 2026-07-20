@@ -106,3 +106,35 @@ def test_transplanted_model_generates_language(tokenizer, our_model):
     text = tokenizer.decode(out[0, len(ids):].tolist())
     assert len(text.strip()) > 0
     print(f"\ntransplant says: {text.strip()!r}")
+
+
+def test_embeddings_only_mode_moves_only_new_rows():
+    # warm-start safety: after a training step, the pretrained rows and all
+    # blocks must be bit-identical; only the appended rows may change
+    import torch.nn.functional as F
+    from model.config import ModelConfig
+    from model.train import configure_embeddings_only
+    from model.transformer import DesktopHelperLM
+
+    cfg = ModelConfig(vocab_size=100, context_len=32, d_model=64, n_heads=4,
+                      n_layers=2, d_ff=128)
+    model = DesktopHelperLM(cfg)
+    configure_embeddings_only(model, first_new_row=90)
+
+    before_emb = model.token_emb.weight.detach().clone()
+    before_block = model.blocks[0].attn.qkv.weight.detach().clone()
+
+    # weight_decay=0 mirrors train.py's embeddings-only mode — AdamW decay
+    # would move gradient-masked rows otherwise
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
+                            lr=1e-2, weight_decay=0.0)
+    x = torch.randint(0, 100, (2, 16))
+    y = torch.randint(90, 100, (2, 16))  # targets in the new-row range
+    _, loss = model(x, y)
+    loss.backward()
+    opt.step()
+
+    after_emb = model.token_emb.weight.detach()
+    assert torch.equal(after_emb[:90], before_emb[:90]), "pretrained rows moved!"
+    assert not torch.equal(after_emb[90:], before_emb[90:]), "new rows did not move"
+    assert torch.equal(model.blocks[0].attn.qkv.weight.detach(), before_block), "blocks moved!"

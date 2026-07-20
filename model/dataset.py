@@ -41,6 +41,7 @@ class InstructDataset(Dataset):
         tool_calls_path: str | Path,
         context_len: int = 1024,
         seed: int = 42,
+        include_dolly: bool = True,
     ):
         self._pad_id = tokenizer.pad_id
         self.context_len = context_len
@@ -49,13 +50,17 @@ class InstructDataset(Dataset):
         # keeping general instruction data in the mix matters MORE now than in
         # the OPT era: the base model already converses well, and a diet of
         # pure synthetic tool-calls would erode that (catastrophic forgetting).
-        dolly = load_dataset("databricks/databricks-dolly-15k", split="train")
+        # (include_dolly=False is for the embeddings-only warm start, where
+        # nothing but the tool-token rows can change — forgetting is impossible
+        # and a concentrated routing signal is exactly what's wanted.)
         examples = []
-        for ex in dolly:
-            prompt = ex["instruction"].strip()
-            if ex.get("context", "").strip():
-                prompt += "\n\n" + ex["context"].strip()
-            examples.append({"prompt": prompt, "response": ex["response"].strip()})
+        if include_dolly:
+            dolly = load_dataset("databricks/databricks-dolly-15k", split="train")
+            for ex in dolly:
+                prompt = ex["instruction"].strip()
+                if ex.get("context", "").strip():
+                    prompt += "\n\n" + ex["context"].strip()
+                examples.append({"prompt": prompt, "response": ex["response"].strip()})
 
         # append synthetic tool-call (and no-tool chat) examples
         with open(tool_calls_path) as f:
