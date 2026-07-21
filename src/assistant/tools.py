@@ -185,6 +185,14 @@ def build_handlers(config: dict, memory=None) -> dict[str, Handler]:
         return stocks.quotes(message, config["stocks"]["watchlist"])
 
     def screen_handler(message: str) -> str:
+        # "the screenshot I just took" → the user's own newest Cmd+Shift
+        # capture; anything else → a live look at the current screen
+        m = message.lower()
+        if "screenshot" in m or "screen shot" in m:
+            latest = capture.latest_screenshot()
+            if latest is not None:
+                return capture.describe_image(latest)
+            return "No screenshots found in your screenshots folder"
         return capture.describe()
 
     def memory_handler(message: str) -> str:
@@ -312,6 +320,10 @@ def build_fallback_router(config: dict | None = None) -> Handler:
         # model treat it as a general question (argmax = text, no call)
         if "weather" in lower or "forecast" in lower or "temperature" in lower:
             return "weather"
+        # "Tell me about the screenshot I just took" — the tool grammar in
+        # training was live-screen questions; the screenshot phrasing is OOD
+        if "screenshot" in lower or "screen shot" in lower:
+            return "screen"
         if _is_capability_question(message):
             return "chat"
         return None if model_chat else "chat"
@@ -384,6 +396,19 @@ _LOCATION_RE = re.compile(r"\b(?:in|for) ([A-Z][\w.'-]*(?: [A-Z][\w.'-]*)*)")
 def extract_location(message: str) -> str | None:
     match = _LOCATION_RE.search(message)
     return match.group(1).rstrip("?!.") if match else None
+
+
+def build_reprompts() -> dict[str, Callable[[str], str]]:
+    """Tool → prompt-builder for the dispatcher's reprompt mode: the real
+    result becomes a fresh chat prompt, answered with the model's preserved
+    instruct ability. For tools whose result should be understood, not
+    recited — the user asked what's HAPPENING on screen, not for a read-back
+    of the app list."""
+    def screen_prompt(result: str) -> str:
+        return (f"{result}\n"
+                "Based on that, tell me in one or two sentences what I'm "
+                "looking at and what's happening.")
+    return {"screen": screen_prompt}
 
 
 def build_verbatim() -> dict[str, Handler]:

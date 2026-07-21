@@ -216,6 +216,9 @@ def test_fallback_router_covers_weather_and_spotify():
     # …but capability questions stay canned: the model invents features
     assert fallback("What can you do?") == "chat"
     assert fallback("help") == "chat"
+    # screenshot phrasing is outside the training grammar → keyword net
+    assert fallback("Tell me about the screenshot I just took") == "screen"
+    assert fallback("what's in my last screen shot?") == "screen"
     # model_chat=false opts all unrouted chat back into canned replies
     canned = build_fallback_router({"features": {"model_chat": False}})
     assert canned("Hello there!") == "chat"
@@ -282,6 +285,42 @@ def test_launcher_delegates_play_requests_to_spotify(monkeypatch):
 
     # a real launch request still launches, not searches
     assert tools.launcher.match_app("Open Spotify", config["allowed_apps"]) is not None
+
+
+def test_screen_handler_screenshot_intent(monkeypatch, tmp_path):
+    from src.assistant import tools
+    from src.assistant.tools import build_handlers
+
+    config = {
+        "features": {},
+        "allowed_apps": [],
+        "stocks": {"watchlist": []},
+        "news": {"rss_feeds": []},
+        "weather": {"location": "Nowhere"},
+    }
+    shot = tmp_path / "Screenshot test.png"
+    monkeypatch.setattr(tools.capture, "latest_screenshot", lambda: shot)
+    monkeypatch.setattr(tools.capture, "describe_image",
+                        lambda p: f"Text visible in the screenshot {p.name}: hi")
+    monkeypatch.setattr(tools.capture, "describe", lambda: "Live screen")
+
+    handlers = build_handlers(config)
+    # screenshot phrasing → the user's own file, not a live capture
+    assert "Screenshot test.png" in handlers["screen"]("describe the screenshot I took")
+    # live phrasing → live capture
+    assert handlers["screen"]("what's on my screen?") == "Live screen"
+    # no screenshots on disk → honest fallback message
+    monkeypatch.setattr(tools.capture, "latest_screenshot", lambda: None)
+    assert "No screenshots found" in handlers["screen"]("my latest screenshot?")
+
+
+def test_reprompt_builder_covers_screen():
+    from src.assistant.tools import build_reprompts
+
+    reprompts = build_reprompts()
+    prompt = reprompts["screen"]("Code in front. On screen: def main():")
+    assert "Code in front. On screen: def main():" in prompt
+    assert "what I'm looking at" in prompt
 
 
 def test_build_handlers_respects_feature_flags():
