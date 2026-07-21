@@ -29,10 +29,12 @@ import rumps
 from AppKit import NSApplication, NSFloatingWindowLevel, NSImage
 from PyObjCTools import AppHelper
 
-from src.assistant.engine import PROJECT_ROOT, load_engine
+from src.applog import get_logger
+from src.assistant.engine import load_engine
 from src.config import settings
+from src.paths import is_frozen, resource_path
 
-ICON_PATH = PROJECT_ROOT / "assets" / "AppIcon.icns"
+ICON_PATH = resource_path("assets", "AppIcon.icns")
 
 TITLE_LOADING = "⏳"
 TITLE_READY = "◆"
@@ -99,9 +101,11 @@ class DesktopHelperMenuBar(rumps.App):
             threading.Thread(target=self._startup_briefing, daemon=True).start()
 
     def _apply_keybind_labels(self) -> None:
-        """Show each action's global keybind on its menu item, native-style
-        (dim, right-aligned). Display only — the tap consumes real presses."""
-        from src.menubar.hotkey import combo_display
+        """Show each action's global keybind in its menu item title. DISPLAY
+        ONLY — a functional NSMenuItem keyEquivalent would double-fire with the
+        real global hotkey (RegisterEventHotKey), and only worked while the app
+        was frontmost anyway. Plain text sidesteps both."""
+        from src.menubar.hotkey import combo_symbols
         keybinds = dict(self.config.get("keybinds") or {})
         if not keybinds:
             keybinds["speak" if self.voice_enabled else "ask"] = self.hotkey_combo
@@ -112,12 +116,9 @@ class DesktopHelperMenuBar(rumps.App):
             item = items.get(name)
             if item is None or not combo:
                 continue
-            display = combo_display(combo)
-            if display is None:
-                continue
             try:
-                item._menuitem.setKeyEquivalent_(display[0])
-                item._menuitem.setKeyEquivalentModifierMask_(display[1])
+                base = item.title.split("  ")[0]  # idempotent if re-applied
+                item.title = f"{base}  {combo_symbols(combo)}"
             except Exception:
                 pass  # cosmetic — rumps internals may shift
 
@@ -141,11 +142,15 @@ class DesktopHelperMenuBar(rumps.App):
     # -- startup ------------------------------------------------------------
 
     def _load_model(self) -> None:
+        log = get_logger()
+        log.info("loading model from %s", self.config.get("model", {}).get("checkpoint"))
         try:
             dispatcher, device = load_engine(self.config)
         except Exception as exc:
+            log.exception("model failed to load")
             self._on_main(self._set_status, "⚠️", f"Model failed to load: {exc}")
             return
+        log.info("model ready on %s", device.type)
         self.dispatcher = dispatcher
         hotkey_live = self._hotkeys is not None and self._hotkeys.ok
         speak_combo = (self.config.get("keybinds") or {}).get("speak") or self.hotkey_combo
@@ -420,7 +425,13 @@ class DesktopHelperMenuBar(rumps.App):
 
 
 def main() -> None:
-    DesktopHelperMenuBar().run()
+    log = get_logger()
+    log.info("Desktop Helper starting (frozen=%s)", is_frozen())
+    try:
+        DesktopHelperMenuBar().run()
+    except Exception:
+        log.exception("fatal error in menu bar app")
+        raise
 
 
 if __name__ == "__main__":
