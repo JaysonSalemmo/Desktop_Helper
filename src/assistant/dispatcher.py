@@ -65,6 +65,7 @@ class ToolDispatcher:
         repetition_penalty: float = 1.1,
         verbatim: "dict[str, Callable[[str], str]] | None" = None,
         reprompt: "dict[str, Callable[[str], str]] | None" = None,
+        pre_router: "Callable[[str], str | None] | None" = None,
         fallback_router: "Callable[[str], str | None] | None" = None,
         route_confidence: float = 0.6,
         memory=None,  # optional ChromaMemory — records every completed exchange
@@ -89,6 +90,10 @@ class ToolDispatcher:
         # result should be UNDERSTOOD rather than recited — screen OCR text
         # wants "you're looking at a checkout page", not a read-back.
         self.reprompt = reprompt or {}
+        # consulted BEFORE the model — forces a tool for queries the model
+        # can't route but reliably mis-routes (file search has no tool token
+        # yet argmaxes reminders/launcher). Returns a tool name or None.
+        self.pre_router = pre_router
         # consulted only when the model emits NO tool call — safety net for
         # phrasings outside the training distribution ("Play X on Spotify"
         # produced gibberish chat instead of routing)
@@ -183,6 +188,19 @@ class ToolDispatcher:
         return DispatchResult(response=self._describe(prompt),
                               tool=tool, tool_result=tool_result)
 
+    def _finish_via_router(self, tool: str, message: str) -> "DispatchResult":
+        """A router (pre- or fallback) picked the tool without the model. Run
+        it and reply in the tool's mode: reprompt tools describe, verbatim
+        tools template, the rest return the raw result — the model didn't route
+        it, so it doesn't get to wrap it."""
+        tool_result = self._run_tool(tool, message)
+        if tool in self.reprompt:
+            return self._reply_via_reprompt(tool, tool_result)
+        template = self.verbatim.get(tool)
+        response = template(tool_result) if template else tool_result
+        return DispatchResult(response=response, tool=tool,
+                              tool_result=tool_result)
+
     def _run_tool(self, tool: str, message: str) -> str:
         handler = self.handlers.get(tool)
         if handler is None:
@@ -203,6 +221,13 @@ class ToolDispatcher:
         return result
 
     def _respond(self, message: str) -> DispatchResult:
+        # pre-router first: for queries the model can't route but reliably
+        # mis-routes (file search), force the tool with no generation at all
+        if self.pre_router is not None:
+            forced = self.pre_router(message)
+            if forced is not None:
+                return self._finish_via_router(forced, message)
+
         # ChatML priming via the shared format module — the first generated
         # token (the routing decision) lands exactly after "assistant\n",
         # identically to how every training example was framed
@@ -235,15 +260,7 @@ class ToolDispatcher:
                 # and training always puts the call first.)
                 routed = self.fallback_router(message)
                 if routed is not None:
-                    tool_result = self._run_tool(routed, message)
-                    if routed in self.reprompt:
-                        return self._reply_via_reprompt(routed, tool_result)
-                    template = self.verbatim.get(routed)
-                    # no template → return the raw result; the model already
-                    # declined to route, so it doesn't get to wrap this one
-                    response = template(tool_result) if template else tool_result
-                    return DispatchResult(response=response, tool=routed,
-                                          tool_result=tool_result)
+                    return self._finish_via_router(routed, message)
 
             if tool is not None and tool_used is None:
                 # intercept: keep the [CALL: tool] token, then inject the *real* result

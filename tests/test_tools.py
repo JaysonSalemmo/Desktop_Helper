@@ -241,7 +241,7 @@ def test_verbatim_replies_template_and_passthrough():
 
     v = build_verbatim()
     assert set(v) == {"calendar", "reminders", "notes", "spotify", "stocks",
-                      "launcher", "memory", "chat"}
+                      "launcher", "files", "memory", "chat"}
     assert v["launcher"]("VS Code launched") == "VS Code is open."
     assert v["launcher"]("Now playing: X by Y") == "Now playing: X by Y"
     assert v["spotify"]("Love All (with JAY-Z) by Drake") == \
@@ -314,6 +314,68 @@ def test_screen_handler_screenshot_intent(monkeypatch, tmp_path):
     assert "No screenshots found" in handlers["screen"]("my latest screenshot?")
 
 
+def test_extract_file_query():
+    from src.assistant.tools import extract_file_query
+
+    # possessive locate phrases + explicit file nouns extract the term
+    assert extract_file_query("Find my resume.") == "resume"
+    assert extract_file_query("Where is my budget spreadsheet") == "budget"
+    assert extract_file_query("Show me the files named tax") == "tax"
+    assert extract_file_query("locate report.pdf") == "report.pdf"
+    assert extract_file_query("find my tax documents") == "tax"
+    # an extension alone signals a file request (no possessive needed)
+    assert extract_file_query("find invoice.pdf") == "invoice.pdf"
+    # not a file request → None (must not steal generic questions)
+    assert extract_file_query("Where is the coffee shop?") is None
+    assert extract_file_query("find a good time to meet") is None
+    assert extract_file_query("What's the weather?") is None
+    assert extract_file_query("find my files") is None  # bare noun, no term
+
+
+def test_pre_router_forces_unambiguous_file_queries():
+    from src.assistant.tools import build_pre_router
+
+    pre = build_pre_router()
+    # explicit file noun or a real extension → force files (override model)
+    assert pre("where is my resume file") == "files"
+    assert pre("find my budget document") == "files"
+    assert pre("locate invoice.pdf") == "files"
+    # softer phrasing (no noun/extension) → let the model try; fallback nets it
+    assert pre("find my resume") is None
+    assert pre("where is my budget") is None
+    # not a file query at all → None
+    assert pre("what's the weather in Tokyo") is None
+    assert pre("remind me to call mom") is None
+
+
+def test_fallback_router_routes_file_search():
+    from src.assistant.tools import build_fallback_router
+
+    fallback = build_fallback_router()
+    assert fallback("Find my resume") == "files"
+    assert fallback("where is my budget file") == "files"
+    # generic questions still fall through to the model, not files
+    assert fallback("Where is the nearest coffee shop?") is None
+
+
+def test_files_handler_searches_and_reports(monkeypatch):
+    from src.assistant import tools
+    from src.assistant.tools import build_handlers
+
+    config = {"features": {}, "allowed_apps": [], "stocks": {"watchlist": []},
+              "news": {"rss_feeds": []}, "weather": {"location": "X"},
+              "files": {"max_results": 2}}
+    captured = {}
+    monkeypatch.setattr(tools.files, "find",
+                        lambda q, n: captured.update(q=q, n=n) or f"Found: {q}")
+    handlers = build_handlers(config)
+
+    assert handlers["files"]("Find my resume") == "Found: resume"
+    assert captured == {"q": "resume", "n": 2}  # term extracted, max_results passed
+    # no extractable term → asks for one, never shells out
+    assert "part of the file name" in handlers["files"]("find my files")
+
+
 def test_reprompt_builder_covers_screen():
     from src.assistant.tools import build_reprompts
 
@@ -336,7 +398,7 @@ def test_build_handlers_respects_feature_flags():
     handlers = build_handlers(config)
     assert set(handlers) == {
         "spotify", "calendar", "screen", "reminders", "notes",
-        "launcher", "weather", "news", "stocks", "memory", "chat",
+        "launcher", "weather", "news", "stocks", "files", "memory", "chat",
     }
     assert handlers["weather"]("any") == "weather is disabled in config"
     assert handlers["screen"]("any") == "screen is disabled in config"

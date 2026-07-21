@@ -15,7 +15,8 @@ from model.generate import load_model
 from model.tokenizer import DesktopHelperTokenizer
 from src.assistant.dispatcher import ToolDispatcher
 from src.assistant.tools import (build_fallback_router, build_handlers,
-                                 build_reprompts, build_verbatim)
+                                 build_pre_router, build_reprompts,
+                                 build_verbatim)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TOKENIZER_PATH = PROJECT_ROOT / "model" / "hf_tokenizer"
@@ -53,6 +54,7 @@ def load_engine(config: dict) -> tuple[ToolDispatcher, torch.device]:
     dispatcher = ToolDispatcher(model, tokenizer, build_handlers(config, memory), device,
                                 verbatim=build_verbatim(),
                                 reprompt=build_reprompts(),
+                                pre_router=build_pre_router(config),
                                 fallback_router=build_fallback_router(config),
                                 memory=memory)
     return dispatcher, device

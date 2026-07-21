@@ -234,6 +234,29 @@ def test_fallback_router_rescues_unrouted_messages():
     assert result.tool is None
 
 
+def test_pre_router_forces_tool_without_running_model():
+    tok = _tokenizer()
+    # the model, if consulted, would emit a (wrong) tool call — but the
+    # pre-router must short-circuit before any forward pass happens
+    model = ScriptedModel([tok.tool_token_id("stocks"), tok.eos_id], tok.vocab_size)
+    d = ToolDispatcher(
+        model, tok, {"files": lambda m: "Found 1 file: resume.pdf (~/Downloads)"},
+        device=torch.device("cpu"), top_k=1,
+        verbatim={"files": lambda r: r},
+        pre_router=lambda m: "files" if "file" in m.lower() else None,
+    )
+    result = d.respond("where is my resume file")
+    assert result.tool == "files"
+    assert result.response == "Found 1 file: resume.pdf (~/Downloads)"
+    assert model.i == 0  # model never ran — pre-router short-circuited
+
+    # a non-matching message falls through to normal model routing
+    model2 = ScriptedModel([tok.tool_token_id("stocks"), tok.eos_id], tok.vocab_size)
+    d.model = model2.eval()
+    assert d.respond("how are my stocks").tool == "stocks"
+    assert model2.i > 0
+
+
 def test_reprompt_tool_answers_with_fresh_chat_generation():
     tok = _tokenizer()
     word = tok.encode("interesting")[0]

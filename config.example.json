@@ -20,7 +20,11 @@
         "spotify": true,
         "screen_capture": false,
         "notes": true,
+        "files": true,
         "startup_briefing": true
+    },
+    "files": {
+        "max_results": 5
     },
     "stocks": {
         "watchlist": ["AAPL", "NVDA", "MSFT"]

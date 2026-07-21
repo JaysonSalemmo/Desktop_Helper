@@ -16,6 +16,7 @@ responds, but says it's disabled).
 import re
 from collections.abc import Callable
 
+from src.file_finder import files
 from src.launcher import launcher
 from src.news import news
 from src.notes import notes
@@ -51,6 +52,65 @@ def extract_play_query(message: str) -> str | None:
     if query.lower().endswith(" on spotify"):
         query = query[: -len(" on spotify")].rstrip()
     if query.lower() in _GENERIC_PLAY:
+        return None
+    return query or None
+
+
+# file search has no model tool token (like memory) — the fallback router is
+# its only path, so extract_file_query doubles as the intent gate AND the
+# term extractor. Intent is kept HIGH-PRECISION: an explicit file noun, or a
+# POSSESSIVE locate phrase ("find my", "where's my", "locate"). Bare "find"/
+# "where is" are too broad ("where is the coffee shop" is not a file search)
+# and would steal generic questions from the model.
+_FILE_NOUN_RE = re.compile(r"\b(?:files?|folders?|documents?)\b", re.I)
+_FILE_INTENT_RE = re.compile(
+    r"\b(?:find my|locate|where(?:'s| is| are) my)\b", re.I)
+# a token like "invoice.pdf" is an unambiguous file reference on its own —
+# curated to user-document types (not code extensions, which are dev noise)
+_FILE_EXT_RE = re.compile(
+    r"\b[\w-]+\.(?:pdf|docx?|xlsx?|pptx?|txt|md|csv|rtf|pages|numbers|key|"
+    r"zip|png|jpe?g|gif|heic|mov|mp4|mp3|wav|json|ya?ml)\b", re.I)
+# leading scaffolding stripped to reach the search term
+_FILE_STRIP_RE = re.compile(
+    r"^(?:can you |could you |please )?"
+    r"(?:find|locate|look for|search for|show me|where(?:'s| is| are))\s+"
+    r"(?:my |the |a |any |all )?",
+    re.I,
+)
+_FILE_NOUN_PREFIX_RE = re.compile(
+    r"^(?:files?|folders?|documents?)\s+(?:named |called |about |for |with )", re.I)
+# trailing type words ("budget spreadsheet" → search "budget"): the type isn't
+# part of the filename, and mdfind -name matches the name, not the kind
+_FILE_TYPE_TAIL_RE = re.compile(
+    r"\s+(?:spreadsheets?|documents?|files?|folders?|photos?|pictures?|docs?)$",
+    re.I)
+_FILE_LEADING_MY_RE = re.compile(r"^my\s+", re.I)
+# a query that reduces to a bare type noun ("find my files") carries no actual
+# search term — nothing to hand mdfind
+_FILE_BARE_NOUNS = {"file", "files", "folder", "folders", "document",
+                    "documents", "doc", "docs", "photo", "photos",
+                    "picture", "pictures"}
+
+
+def extract_file_query(message: str) -> str | None:
+    """The filename term to search for, or None when it isn't a file request.
+
+    "Find my resume."               → "resume"
+    "Where is my budget spreadsheet" → "budget"
+    "Show me the files named tax"    → "tax"
+    "Where is the coffee shop?"      → None (no possessive / file noun)
+    "Find my files"                  → None (no actual search term)
+    """
+    text = message.strip().rstrip(".!?")
+    lower = text.lower()
+    if not (_FILE_NOUN_RE.search(lower) or _FILE_INTENT_RE.search(lower)
+            or _FILE_EXT_RE.search(text)):
+        return None
+    query = _FILE_STRIP_RE.sub("", text).strip()
+    query = _FILE_NOUN_PREFIX_RE.sub("", query).strip()
+    query = _FILE_TYPE_TAIL_RE.sub("", query).strip()
+    query = _FILE_LEADING_MY_RE.sub("", query).strip()
+    if query.lower() in _FILE_BARE_NOUNS:
         return None
     return query or None
 
@@ -195,6 +255,13 @@ def build_handlers(config: dict, memory=None) -> dict[str, Handler]:
             return "No screenshots found in your screenshots folder"
         return capture.describe()
 
+    def files_handler(message: str) -> str:
+        query = extract_file_query(message)
+        if not query:
+            return "Tell me part of the file name to search for"
+        max_results = config.get("files", {}).get("max_results", 5)
+        return files.find(query, max_results)
+
     def memory_handler(message: str) -> str:
         if memory is None:
             return "Memory isn't set up"
@@ -219,6 +286,7 @@ def build_handlers(config: dict, memory=None) -> dict[str, Handler]:
         "weather": weather_handler,
         "news": news_handler,
         "stocks": stocks_handler,
+        "files": files_handler,    # fallback-router only — no model token
         "memory": memory_handler,  # fallback-router only — no model token
         "chat": make_chat_handler(config),  # fallback-router only
     }
@@ -292,6 +360,29 @@ def _launcher_reply(result: str) -> str:
     return result
 
 
+def build_pre_router(config: dict | None = None) -> "Callable[[str], str | None]":
+    """High-precision routing that runs BEFORE the model.
+
+    File search has no model tool token, and file-search phrasing collides hard
+    with the trained tools — measured live, "where is my resume" argmaxes
+    reminders and "find the file called report" argmaxes launcher, both
+    confidently enough to clear the gate, so the fallback router (which only
+    fires when the model emits NO call) never gets a turn. The cure is to
+    intercept the *unambiguous* file queries — those naming a file noun
+    ("...my budget document") or a real extension ("invoice.pdf") — and route
+    them to files without asking the model at all. Softer phrasings ("find my
+    resume", no noun/extension) stay best-effort via the fallback router.
+
+    Returns the tool name to force, or None to let the model route normally."""
+    def pre_route(message: str) -> str | None:
+        if extract_file_query(message) is None:
+            return None  # not a file request (no clean term to search)
+        if _FILE_NOUN_RE.search(message.lower()) or _FILE_EXT_RE.search(message):
+            return "files"
+        return None
+    return pre_route
+
+
 def build_fallback_router(config: dict | None = None) -> Handler:
     """Routes messages the model failed to route (no [CALL] emitted at all).
 
@@ -324,6 +415,11 @@ def build_fallback_router(config: dict | None = None) -> Handler:
         # training was live-screen questions; the screenshot phrasing is OOD
         if "screenshot" in lower or "screen shot" in lower:
             return "screen"
+        # "Find my resume" / "where is my budget file" — no model token for
+        # file search (like memory), so the keyword router is its only path.
+        # Checked after the other tools so their phrasings win first.
+        if extract_file_query(message) is not None:
+            return "files"
         if _is_capability_question(message):
             return "chat"
         return None if model_chat else "chat"
@@ -336,8 +432,9 @@ _GREETINGS = ("hello", "hi", "hey", "yo", "sup", "good morning",
               "good afternoon", "good evening", "what's up", "whats up")
 
 _CAPABILITIES = ("I can check your calendar, reminders, weather, news, and "
-                 "stocks, read your notes, describe your screen, play music "
-                 "on Spotify, and remember what we've talked about.")
+                 "stocks, read your notes, describe your screen, find your "
+                 "files, play music on Spotify, and remember what we've "
+                 "talked about.")
 
 
 def _is_greeting(message: str) -> bool:
@@ -425,6 +522,7 @@ def build_verbatim() -> dict[str, Handler]:
         "spotify": _spotify_reply,
         "stocks": _stocks_reply,
         "launcher": _launcher_reply,
+        "files": lambda result: result,   # handler already returns a sentence
         "memory": lambda result: result,  # handler already returns a sentence
         "chat": lambda result: result,
     }
