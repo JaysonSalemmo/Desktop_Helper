@@ -197,11 +197,66 @@ def _calendar_handler(message: str) -> str:
         return "Calendar access not granted"
 
 
+# "Remind me to call the dentist" → create; anything else → read the list.
+# Ordered longest-first so "add a reminder to" strips before "add a reminder".
+_REMINDER_ADD_PREFIXES = ["remind me to ", "remind me ", "set a reminder to ",
+                          "set a reminder ", "add a reminder to ",
+                          "add a reminder ", "create a reminder to ",
+                          "reminder to "]
+# "…on/in/to my <name> list" targets a specific list; the name is matched
+# against the user's ACTUAL lists at runtime (reminders._find_calendar)
+_REMINDER_LIST_RE = re.compile(
+    r"\b(?:on|in|to|from)\s+(?:my\s+|the\s+)?(.+?)\s+list\b", re.I)
+_TRAILING_CONNECTORS = ("at", "on", "by", "for", "to", "in")
+
+
+def extract_reminder_list(message: str) -> str | None:
+    """The reminder-list name in the message ("…on my Work list"), or None."""
+    m = _REMINDER_LIST_RE.search(message)
+    return m.group(1).strip() if m else None
+
+
+def extract_reminder(message: str) -> tuple[str, str | None] | None:
+    """(text to remind about, list name or None) for a create request, else
+    None. The list phrase is stripped from the text; the due date is left in for
+    the handler to parse via NSDataDetector."""
+    lower = message.lower()
+    for prefix in _REMINDER_ADD_PREFIXES:
+        if prefix in lower:
+            text = message[lower.index(prefix) + len(prefix):].strip(" :.")
+            list_name = extract_reminder_list(text)
+            if list_name:
+                text = _REMINDER_LIST_RE.sub("", text).strip(" :.")
+            return (text, list_name) if text else None
+    return None
+
+
+def strip_due_text(text: str, date_text: str | None) -> str:
+    """Remove the matched date phrase + any dangling connector so the title reads
+    cleanly ("call the dentist tomorrow at 3pm" → "call the dentist")."""
+    if date_text:
+        text = text.replace(date_text, "", 1)
+    words = text.strip(" ,.").split()
+    while words and words[-1].lower() in _TRAILING_CONNECTORS:
+        words.pop()
+    return " ".join(words)
+
+
 def _reminders_handler(message: str) -> str:
     from src.reminders import reminders  # EventKit import deferred
     from src.eventkit.store import AccessDenied
     try:
-        return reminders.incomplete_summary()
+        parsed = extract_reminder(message)
+        if parsed is not None:
+            text, list_name = parsed
+            due, date_text = reminders.parse_due(text)
+            title = strip_due_text(text, date_text)
+            if not title:
+                return "What should the reminder say?"
+            return reminders.add(title, due=due, due_text=date_text,
+                                 list_name=list_name)
+        # read — optionally from a named list ("what's on my Work list?")
+        return reminders.incomplete_summary(extract_reminder_list(message))
     except AccessDenied:
         return "Reminders access not granted"
 
@@ -323,6 +378,8 @@ def _calendar_reply(result: str) -> str:
 def _reminders_reply(result: str) -> str:
     if result == "No reminders set":
         return "You don't have any reminders set."
+    if result.startswith(("Reminder added", "Couldn't save")):
+        return result  # a create confirmation — already a full sentence
     if _is_fallback(result):
         return result
     return f"Your reminders: {result}."
@@ -420,6 +477,14 @@ def build_fallback_router(config: dict | None = None) -> Handler:
         # Checked after the other tools so their phrasings win first.
         if extract_file_query(message) is not None:
             return "files"
+        # "Remind me to go for a run in an hour" — reminder CREATE phrasing was
+        # never trained (the model saw only a couple of READ prompts), so it
+        # falls to chat and produces garbage; casing variants of reads miss too.
+        # Checked after weather so "remind me what the weather is" stays weather.
+        if extract_reminder(message) is not None \
+                or extract_reminder_list(message) is not None \
+                or "reminder" in lower or "to-do" in lower or "to do list" in lower:
+            return "reminders"
         if _is_capability_question(message):
             return "chat"
         return None if model_chat else "chat"

@@ -219,6 +219,11 @@ def test_fallback_router_covers_weather_and_spotify():
     # screenshot phrasing is outside the training grammar → keyword net
     assert fallback("Tell me about the screenshot I just took") == "screen"
     assert fallback("what's in my last screen shot?") == "screen"
+    # reminder create phrasing + casing/list read variants the model misses
+    assert fallback("Remind me to go for a run in an hour") == "reminders"
+    assert fallback("check my reminders") == "reminders"
+    assert fallback("what's on my Work list?") == "reminders"
+    assert fallback("remind me what the weather is") == "weather"  # weather wins
     # model_chat=false opts all unrouted chat back into canned replies
     canned = build_fallback_router({"features": {"model_chat": False}})
     assert canned("Hello there!") == "chat"
@@ -374,6 +379,40 @@ def test_files_handler_searches_and_reports(monkeypatch):
     assert captured == {"q": "resume", "n": 2}  # term extracted, max_results passed
     # no extractable term → asks for one, never shells out
     assert "part of the file name" in handlers["files"]("find my files")
+
+
+def test_extract_reminder():
+    from src.assistant.tools import (extract_reminder, extract_reminder_list,
+                                     strip_due_text)
+
+    # create intent → (reminder text, list name or None); read → None
+    assert extract_reminder("Remind me to call the dentist") == ("call the dentist", None)
+    assert extract_reminder("set a reminder to buy milk") == ("buy milk", None)
+    assert extract_reminder("What are my reminders?") is None
+
+    # list targeting — matched against the user's actual lists at runtime
+    assert extract_reminder("remind me to buy milk on my Groceries list") \
+        == ("buy milk", "Groceries")
+    assert extract_reminder("add a reminder to finish the report to my Work list") \
+        == ("finish the report", "Work")
+    # list name on a READ request too
+    assert extract_reminder_list("what's on my Work list?") == "Work"
+    assert extract_reminder_list("check my reminders") is None
+
+    # the due-date phrase is stripped from the title (components come from
+    # NSDataDetector separately), including any dangling connector word
+    assert strip_due_text("call the dentist tomorrow at 3pm", "tomorrow at 3pm") \
+        == "call the dentist"
+    assert strip_due_text("buy milk", None) == "buy milk"
+
+
+def test_reminders_reply_passes_through_create_confirmation():
+    from src.assistant.tools import build_verbatim
+
+    reply = build_verbatim()["reminders"]
+    assert reply("Reminder added: buy milk") == "Reminder added: buy milk"
+    assert reply("Return library books") == "Your reminders: Return library books."
+    assert reply("No reminders set") == "You don't have any reminders set."
 
 
 def test_reprompt_builder_covers_screen():
