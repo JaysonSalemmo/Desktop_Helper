@@ -207,8 +207,17 @@ class DesktopHelperMenuBar(rumps.App):
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
         window = rumps.Window(
             message="", title="Desktop Helper", default_text="",
-            ok="Ask", cancel="Cancel", dimensions=(380, 48),
+            ok="Ask", cancel="Cancel", dimensions=(380, 96),  # taller: multi-line asks
         )
+        try:
+            # let long/pasted text wrap to multiple lines instead of scrolling
+            # off one line (rumps' field is single-line by default)
+            field = window._textfield
+            field.setUsesSingleLineMode_(False)
+            field.cell().setWraps_(True)
+            field.cell().setScrollable_(False)
+        except Exception:
+            pass  # rumps internal — best effort, never break the ask flow
         try:
             self._float_front(window._alert.window())  # rumps internal — best effort
         except AttributeError:

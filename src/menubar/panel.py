@@ -17,17 +17,22 @@ import objc
 from AppKit import (
     NSAnimationContext,
     NSBackingStoreBuffered,
+    NSBezelBorder,
     NSButton,
     NSColor,
     NSFloatingWindowLevel,
     NSFont,
     NSFontAttributeName,
+    NSForegroundColorAttributeName,
     NSMakeRect,
     NSPanel,
     NSScrollView,
     NSStringDrawingUsesLineFragmentOrigin,
     NSTextField,
+    NSTextView,
     NSView,
+    NSViewHeightSizable,
+    NSViewWidthSizable,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskFullSizeContentView,
     NSWindowStyleMaskMiniaturizable,
@@ -43,7 +48,10 @@ WIDTH, HEIGHT = 500, 380
 PAD = 14
 HEADER_H = 28
 TRAFFIC_LIGHT_CLEARANCE = 96  # well clear of the standard traffic lights
-INPUT_H = 26
+INPUT_MIN_H = 30   # input starts one line tall…
+INPUT_MAX_H = 120  # …grows with content up to here, then scrolls (iMessage-style)
+INPUT_INSET = 6    # text padding inside the rounded input
+ASK_W = 52
 BUBBLE_MAX_W = 340
 BUBBLE_PAD_X = 12
 BUBBLE_PAD_Y = 7
@@ -78,6 +86,53 @@ class _Submitter(NSObject):
             action()
 
 
+_SHIFT_MASK = 1 << 17  # NSEventModifierFlagShift
+
+
+class _ChatInput(NSTextView):
+    """Multi-line chat input: Enter sends, Shift+Enter inserts a newline (the
+    standard chat pattern). Draws a placeholder while empty — NSTextView, unlike
+    NSTextField, has none of its own."""
+
+    def initWithFrame_submit_placeholder_onChange_(self, frame, submit,
+                                                   placeholder, on_change):
+        self = objc.super(_ChatInput, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._submit = submit
+        self._placeholder = placeholder
+        self._on_change = on_change
+        return self
+
+    def keyDown_(self, event):
+        if event.keyCode() in (36, 76):  # Return / numpad Enter
+            if not (event.modifierFlags() & _SHIFT_MASK):
+                self._submit()
+                return
+        objc.super(_ChatInput, self).keyDown_(event)
+
+    def didChangeText(self):
+        # fired on every edit (typing, paste, delete) — drives the auto-grow
+        objc.super(_ChatInput, self).didChangeText()
+        if self._on_change is not None:
+            self._on_change()
+
+    def content_height(self) -> float:
+        """Laid-out height of the current text, so the box can grow to fit."""
+        lm = self.layoutManager()
+        tc = self.textContainer()
+        lm.ensureLayoutForTextContainer_(tc)
+        return lm.usedRectForTextContainer_(tc).size.height
+
+    def drawRect_(self, rect):
+        objc.super(_ChatInput, self).drawRect_(rect)
+        if self.string() == "":
+            NSString.stringWithString_(self._placeholder).drawAtPoint_withAttributes_(
+                (INPUT_INSET + 2, INPUT_INSET),
+                {NSFontAttributeName: self.font(),
+                 NSForegroundColorAttributeName: NSColor.placeholderTextColor()})
+
+
 class ReplyPanel:
     def __init__(self, on_followup, actions: dict | None = None):
         """on_followup(text) is called on the main thread when submitted.
@@ -100,7 +155,8 @@ class ReplyPanel:
         self.panel.center()
 
         content = self.panel.contentView()
-        input_top = PAD + INPUT_H + 10
+        self._input_h = INPUT_MIN_H  # current input height; grows with content
+        input_top = PAD + self._input_h + 10
 
         self._submitter = _Submitter.alloc().initWithCallback_(self._submit)
 
@@ -152,17 +208,45 @@ class ReplyPanel:
         self.scroll.setDocumentView_(self.doc)
         content.addSubview_(self.scroll)
 
-        ask_w = 52
-        self.input = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(PAD, PAD, WIDTH - 2 * PAD - ask_w - 8, INPUT_H))
-        self.input.setPlaceholderString_("Follow up…")
-        self.input.setBezelStyle_(1)  # rounded
-        self.input.setTarget_(self._submitter)
-        self.input.setAction_("submit:")
-        content.addSubview_(self.input)
+        input_w = WIDTH - 2 * PAD - ASK_W - 8
+        # A plain NSView draws the rounded, bordered box reliably — an
+        # NSScrollView's own layer border gets hidden by its clip view. The
+        # (transparent, borderless) scroll view sits inside and auto-fills it.
+        self.input_box = NSView.alloc().initWithFrame_(
+            NSMakeRect(PAD, PAD, input_w, self._input_h))
+        self.input_box.setWantsLayer_(True)
+        _bl = self.input_box.layer()
+        _bl.setCornerRadius_(INPUT_MIN_H / 2)  # capsule at one line, rounded when grown
+        _bl.setMasksToBounds_(True)
+        _bl.setBorderWidth_(1.0)
+        _bl.setBorderColor_(NSColor.separatorColor().CGColor())
+        _bl.setBackgroundColor_(NSColor.textBackgroundColor().CGColor())
 
-        ask = NSButton.alloc().initWithFrame_(
-            NSMakeRect(WIDTH - PAD - ask_w, PAD - 3, ask_w, INPUT_H + 6))
+        self.input_scroll = NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, input_w, self._input_h))
+        self.input_scroll.setHasVerticalScroller_(False)  # shown only past max
+        self.input_scroll.setBorderType_(0)               # NSNoBorder
+        self.input_scroll.setDrawsBackground_(False)
+        self.input_scroll.contentView().setDrawsBackground_(False)
+        self.input_scroll.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        self.input = _ChatInput.alloc().initWithFrame_submit_placeholder_onChange_(
+            NSMakeRect(0, 0, input_w, self._input_h), self._submit,
+            "Follow up…  (⇧⏎ for a new line)", self._resize_input)
+        self.input.setFont_(NSFont.systemFontOfSize_(FONT_SIZE))
+        self.input.setDrawsBackground_(False)  # let the box's fill show through
+        self.input.setRichText_(False)
+        self.input.setVerticallyResizable_(True)
+        self.input.setHorizontallyResizable_(False)
+        self.input.setTextContainerInset_((INPUT_INSET, INPUT_INSET))
+        self.input.textContainer().setWidthTracksTextView_(True)
+        self.input_scroll.setDocumentView_(self.input)
+        self.input_box.addSubview_(self.input_scroll)
+        content.addSubview_(self.input_box)
+
+        # centered vertically on the one-line input (not stretched to its height)
+        btn_h = 22
+        ask = NSButton.alloc().initWithFrame_(NSMakeRect(
+            WIDTH - PAD - ASK_W, PAD + (INPUT_MIN_H - btn_h) / 2, ASK_W, btn_h))
         ask.setTitle_("Ask")
         ask.setBezelStyle_(1)
         ask.setTarget_(self._submitter)
@@ -173,6 +257,30 @@ class ReplyPanel:
         self._pending = None           # the "…" assistant bubble awaiting a reply
         self._pending_question = None  # its question — dedupes the user bubble
 
+    # -- auto-growing input --------------------------------------------------
+
+    def _resize_input(self) -> None:
+        """Grow (or shrink) the input to fit its text, iMessage-style: one line
+        to start, taller as you type, capped at INPUT_MAX_H after which it
+        scrolls internally."""
+        wanted = self.input.content_height() + 2 * INPUT_INSET  # top+bottom padding
+        new_h = max(INPUT_MIN_H, min(INPUT_MAX_H, wanted))
+        if abs(new_h - self._input_h) < 0.5:
+            return
+        self._input_h = new_h
+        # show the scroller only once we've hit the cap
+        self.input_scroll.setHasVerticalScroller_(wanted > INPUT_MAX_H)
+        self._reflow()
+
+    def _reflow(self) -> None:
+        """Reposition the input (anchored at the bottom) and the message area
+        above it for the current input height."""
+        input_w = WIDTH - 2 * PAD - ASK_W - 8
+        # the scroll view auto-fills the box (autoresizing mask), so resize the box
+        self.input_box.setFrame_(NSMakeRect(PAD, PAD, input_w, self._input_h))
+        input_top = PAD + self._input_h + 10
+        self.scroll.setFrame_(
+            NSMakeRect(0, input_top, WIDTH, HEIGHT - input_top - HEADER_H - 2))
 
     # -- bubbles -------------------------------------------------------------
 
@@ -252,7 +360,9 @@ class ReplyPanel:
         if not self._resolve_pending(question):
             self._add_bubble(question, user=True)
         self._add_bubble(reply, user=False)
-        self.input.setStringValue_("")
+        self.input.setString_("")
+        self.input.setNeedsDisplay_(True)  # repaint the placeholder
+        self._resize_input()               # shrink back to one line
         self.panel.orderFrontRegardless()
 
     def show_sections(self, question: str, sections: list[str]) -> None:
@@ -310,8 +420,10 @@ class ReplyPanel:
     # -- internal ------------------------------------------------------------
 
     def _submit(self) -> None:
-        text = str(self.input.stringValue()).strip()
+        text = str(self.input.string()).strip()
         if not text:
             return
-        self.input.setStringValue_("")
+        self.input.setString_("")
+        self.input.setNeedsDisplay_(True)  # repaint the placeholder
+        self._resize_input()               # shrink back to one line
         self._on_followup(text)
