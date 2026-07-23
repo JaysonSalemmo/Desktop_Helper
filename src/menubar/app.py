@@ -338,7 +338,8 @@ class DesktopHelperMenuBar(rumps.App):
 
     def _get_panel(self):
         if self._panel is None:
-            from src.menubar.panel import ReplyPanel
+            from src.menubar.panel import ReplyPanel, install_edit_menu
+            install_edit_menu()  # ⌘C/⌘A/⌘V in the panel — needs the app fully up
             actions = {}
             if self.voice_enabled:
                 actions["Speak"] = lambda: self._toggle_voice(None)

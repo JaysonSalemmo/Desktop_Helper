@@ -25,6 +25,8 @@ from AppKit import (
     NSFontAttributeName,
     NSForegroundColorAttributeName,
     NSMakeRect,
+    NSMenu,
+    NSMenuItem,
     NSPanel,
     NSScrollView,
     NSStringDrawingUsesLineFragmentOrigin,
@@ -57,6 +59,34 @@ BUBBLE_PAD_X = 12
 BUBBLE_PAD_Y = 7
 BUBBLE_GAP = 8
 FONT_SIZE = 13
+
+
+def install_edit_menu() -> None:
+    """Register an Edit menu so ⌘X/⌘C/⌘V/⌘A work app-wide.
+
+    macOS dispatches these key equivalents through the main menu's Edit items to
+    the first responder (cut:/copy:/paste:/selectAll:). A menu-bar (LSUIElement)
+    app has NO main menu by default, so without this every ⌘C/⌘A just beeps —
+    even on selectable text. The menu bar isn't shown for an agent app, but its
+    key equivalents still fire. Call once at startup; idempotent."""
+    from AppKit import NSApplication
+    app = NSApplication.sharedApplication()
+    main = app.mainMenu()
+    if main is None:
+        main = NSMenu.alloc().init()
+        app.setMainMenu_(main)
+    if any(str(main.itemAtIndex_(i).title()) == "Edit"
+           for i in range(main.numberOfItems())):
+        return  # already installed
+    edit_item = NSMenuItem.alloc().init()
+    edit_menu = NSMenu.alloc().initWithTitle_("Edit")
+    for title, action, key in (("Cut", "cut:", "x"), ("Copy", "copy:", "c"),
+                               ("Paste", "paste:", "v"),
+                               ("Select All", "selectAll:", "a")):
+        edit_menu.addItem_(NSMenuItem.alloc()
+                           .initWithTitle_action_keyEquivalent_(title, action, key))
+    edit_item.setSubmenu_(edit_menu)
+    main.addItem_(edit_item)
 
 
 class _FlippedView(NSView):
@@ -152,6 +182,10 @@ class ReplyPanel:
         self.panel.setLevel_(NSFloatingWindowLevel)
         self.panel.setReleasedWhenClosed_(False)
         self.panel.setHidesOnDeactivate_(False)
+        # become key on ANY click (default for non-activating panels is "only
+        # if needed"), so clicking a reply to select it takes keyboard focus and
+        # ⌘A / ⌘C reach the text — without this, copy silently fails
+        self.panel.setBecomesKeyOnlyIfNeeded_(False)
         self.panel.center()
 
         content = self.panel.contentView()
@@ -308,13 +342,18 @@ class ReplyPanel:
                  else NSColor.unemphasizedSelectedContentBackgroundColor())
         layer.setBackgroundColor_(color.CGColor())
 
-        label = NSTextField.wrappingLabelWithString_(text)
+        # a selectable (read-only) NSTextView, NOT a label — NSTextView handles
+        # ⌘A / ⌘C natively when it's first responder, so replies are copyable
+        label = NSTextView.alloc().initWithFrame_(
+            NSMakeRect(BUBBLE_PAD_X, BUBBLE_PAD_Y, bw - 2 * BUBBLE_PAD_X, th + 2))
+        label.setString_(text)
         label.setFont_(font)
+        label.setEditable_(False)
         label.setSelectable_(True)
-        if user:
-            label.setTextColor_(NSColor.whiteColor())
-        label.setFrame_(NSMakeRect(BUBBLE_PAD_X, BUBBLE_PAD_Y,
-                                   bw - 2 * BUBBLE_PAD_X, th + 2))
+        label.setDrawsBackground_(False)
+        label.setTextContainerInset_((0, 0))
+        label.textContainer().setLineFragmentPadding_(0)
+        label.setTextColor_(NSColor.whiteColor() if user else NSColor.labelColor())
         bubble.addSubview_(label)
 
         self.doc.addSubview_(bubble)
