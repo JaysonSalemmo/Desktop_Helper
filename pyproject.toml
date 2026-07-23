@@ -37,5 +37,6 @@ packages = ["src"]
 
 [dependency-groups]
 dev = [
+    "pyinstaller>=6.21.0",
     "tensorboard>=2.21.0",
 ]

@@ -16,6 +16,7 @@ responds, but says it's disabled).
 import re
 from collections.abc import Callable
 
+from src.file_finder import files
 from src.launcher import launcher
 from src.news import news
 from src.notes import notes
@@ -51,6 +52,65 @@ def extract_play_query(message: str) -> str | None:
     if query.lower().endswith(" on spotify"):
         query = query[: -len(" on spotify")].rstrip()
     if query.lower() in _GENERIC_PLAY:
+        return None
+    return query or None
+
+
+# file search has no model tool token (like memory) — the fallback router is
+# its only path, so extract_file_query doubles as the intent gate AND the
+# term extractor. Intent is kept HIGH-PRECISION: an explicit file noun, or a
+# POSSESSIVE locate phrase ("find my", "where's my", "locate"). Bare "find"/
+# "where is" are too broad ("where is the coffee shop" is not a file search)
+# and would steal generic questions from the model.
+_FILE_NOUN_RE = re.compile(r"\b(?:files?|folders?|documents?)\b", re.I)
+_FILE_INTENT_RE = re.compile(
+    r"\b(?:find my|locate|where(?:'s| is| are) my)\b", re.I)
+# a token like "invoice.pdf" is an unambiguous file reference on its own —
+# curated to user-document types (not code extensions, which are dev noise)
+_FILE_EXT_RE = re.compile(
+    r"\b[\w-]+\.(?:pdf|docx?|xlsx?|pptx?|txt|md|csv|rtf|pages|numbers|key|"
+    r"zip|png|jpe?g|gif|heic|mov|mp4|mp3|wav|json|ya?ml)\b", re.I)
+# leading scaffolding stripped to reach the search term
+_FILE_STRIP_RE = re.compile(
+    r"^(?:can you |could you |please )?"
+    r"(?:find|locate|look for|search for|show me|where(?:'s| is| are))\s+"
+    r"(?:my |the |a |any |all )?",
+    re.I,
+)
+_FILE_NOUN_PREFIX_RE = re.compile(
+    r"^(?:files?|folders?|documents?)\s+(?:named |called |about |for |with )", re.I)
+# trailing type words ("budget spreadsheet" → search "budget"): the type isn't
+# part of the filename, and mdfind -name matches the name, not the kind
+_FILE_TYPE_TAIL_RE = re.compile(
+    r"\s+(?:spreadsheets?|documents?|files?|folders?|photos?|pictures?|docs?)$",
+    re.I)
+_FILE_LEADING_MY_RE = re.compile(r"^my\s+", re.I)
+# a query that reduces to a bare type noun ("find my files") carries no actual
+# search term — nothing to hand mdfind
+_FILE_BARE_NOUNS = {"file", "files", "folder", "folders", "document",
+                    "documents", "doc", "docs", "photo", "photos",
+                    "picture", "pictures"}
+
+
+def extract_file_query(message: str) -> str | None:
+    """The filename term to search for, or None when it isn't a file request.
+
+    "Find my resume."               → "resume"
+    "Where is my budget spreadsheet" → "budget"
+    "Show me the files named tax"    → "tax"
+    "Where is the coffee shop?"      → None (no possessive / file noun)
+    "Find my files"                  → None (no actual search term)
+    """
+    text = message.strip().rstrip(".!?")
+    lower = text.lower()
+    if not (_FILE_NOUN_RE.search(lower) or _FILE_INTENT_RE.search(lower)
+            or _FILE_EXT_RE.search(text)):
+        return None
+    query = _FILE_STRIP_RE.sub("", text).strip()
+    query = _FILE_NOUN_PREFIX_RE.sub("", query).strip()
+    query = _FILE_TYPE_TAIL_RE.sub("", query).strip()
+    query = _FILE_LEADING_MY_RE.sub("", query).strip()
+    if query.lower() in _FILE_BARE_NOUNS:
         return None
     return query or None
 
@@ -137,11 +197,66 @@ def _calendar_handler(message: str) -> str:
         return "Calendar access not granted"
 
 
+# "Remind me to call the dentist" → create; anything else → read the list.
+# Ordered longest-first so "add a reminder to" strips before "add a reminder".
+_REMINDER_ADD_PREFIXES = ["remind me to ", "remind me ", "set a reminder to ",
+                          "set a reminder ", "add a reminder to ",
+                          "add a reminder ", "create a reminder to ",
+                          "reminder to "]
+# "…on/in/to my <name> list" targets a specific list; the name is matched
+# against the user's ACTUAL lists at runtime (reminders._find_calendar)
+_REMINDER_LIST_RE = re.compile(
+    r"\b(?:on|in|to|from)\s+(?:my\s+|the\s+)?(.+?)\s+list\b", re.I)
+_TRAILING_CONNECTORS = ("at", "on", "by", "for", "to", "in")
+
+
+def extract_reminder_list(message: str) -> str | None:
+    """The reminder-list name in the message ("…on my Work list"), or None."""
+    m = _REMINDER_LIST_RE.search(message)
+    return m.group(1).strip() if m else None
+
+
+def extract_reminder(message: str) -> tuple[str, str | None] | None:
+    """(text to remind about, list name or None) for a create request, else
+    None. The list phrase is stripped from the text; the due date is left in for
+    the handler to parse via NSDataDetector."""
+    lower = message.lower()
+    for prefix in _REMINDER_ADD_PREFIXES:
+        if prefix in lower:
+            text = message[lower.index(prefix) + len(prefix):].strip(" :.")
+            list_name = extract_reminder_list(text)
+            if list_name:
+                text = _REMINDER_LIST_RE.sub("", text).strip(" :.")
+            return (text, list_name) if text else None
+    return None
+
+
+def strip_due_text(text: str, date_text: str | None) -> str:
+    """Remove the matched date phrase + any dangling connector so the title reads
+    cleanly ("call the dentist tomorrow at 3pm" → "call the dentist")."""
+    if date_text:
+        text = text.replace(date_text, "", 1)
+    words = text.strip(" ,.").split()
+    while words and words[-1].lower() in _TRAILING_CONNECTORS:
+        words.pop()
+    return " ".join(words)
+
+
 def _reminders_handler(message: str) -> str:
     from src.reminders import reminders  # EventKit import deferred
     from src.eventkit.store import AccessDenied
     try:
-        return reminders.incomplete_summary()
+        parsed = extract_reminder(message)
+        if parsed is not None:
+            text, list_name = parsed
+            due, date_text = reminders.parse_due(text)
+            title = strip_due_text(text, date_text)
+            if not title:
+                return "What should the reminder say?"
+            return reminders.add(title, due=due, due_text=date_text,
+                                 list_name=list_name)
+        # read — optionally from a named list ("what's on my Work list?")
+        return reminders.incomplete_summary(extract_reminder_list(message))
     except AccessDenied:
         return "Reminders access not granted"
 
@@ -185,7 +300,22 @@ def build_handlers(config: dict, memory=None) -> dict[str, Handler]:
         return stocks.quotes(message, config["stocks"]["watchlist"])
 
     def screen_handler(message: str) -> str:
+        # "the screenshot I just took" → the user's own newest Cmd+Shift
+        # capture; anything else → a live look at the current screen
+        m = message.lower()
+        if "screenshot" in m or "screen shot" in m:
+            latest = capture.latest_screenshot()
+            if latest is not None:
+                return capture.describe_image(latest)
+            return "No screenshots found in your screenshots folder"
         return capture.describe()
+
+    def files_handler(message: str) -> str:
+        query = extract_file_query(message)
+        if not query:
+            return "Tell me part of the file name to search for"
+        max_results = config.get("files", {}).get("max_results", 5)
+        return files.find(query, max_results)
 
     def memory_handler(message: str) -> str:
         if memory is None:
@@ -211,6 +341,7 @@ def build_handlers(config: dict, memory=None) -> dict[str, Handler]:
         "weather": weather_handler,
         "news": news_handler,
         "stocks": stocks_handler,
+        "files": files_handler,    # fallback-router only — no model token
         "memory": memory_handler,  # fallback-router only — no model token
         "chat": make_chat_handler(config),  # fallback-router only
     }
@@ -247,6 +378,8 @@ def _calendar_reply(result: str) -> str:
 def _reminders_reply(result: str) -> str:
     if result == "No reminders set":
         return "You don't have any reminders set."
+    if result.startswith(("Reminder added", "Couldn't save")):
+        return result  # a create confirmation — already a full sentence
     if _is_fallback(result):
         return result
     return f"Your reminders: {result}."
@@ -284,6 +417,29 @@ def _launcher_reply(result: str) -> str:
     return result
 
 
+def build_pre_router(config: dict | None = None) -> "Callable[[str], str | None]":
+    """High-precision routing that runs BEFORE the model.
+
+    File search has no model tool token, and file-search phrasing collides hard
+    with the trained tools — measured live, "where is my resume" argmaxes
+    reminders and "find the file called report" argmaxes launcher, both
+    confidently enough to clear the gate, so the fallback router (which only
+    fires when the model emits NO call) never gets a turn. The cure is to
+    intercept the *unambiguous* file queries — those naming a file noun
+    ("...my budget document") or a real extension ("invoice.pdf") — and route
+    them to files without asking the model at all. Softer phrasings ("find my
+    resume", no noun/extension) stay best-effort via the fallback router.
+
+    Returns the tool name to force, or None to let the model route normally."""
+    def pre_route(message: str) -> str | None:
+        if extract_file_query(message) is None:
+            return None  # not a file request (no clean term to search)
+        if _FILE_NOUN_RE.search(message.lower()) or _FILE_EXT_RE.search(message):
+            return "files"
+        return None
+    return pre_route
+
+
 def build_fallback_router(config: dict | None = None) -> Handler:
     """Routes messages the model failed to route (no [CALL] emitted at all).
 
@@ -312,6 +468,23 @@ def build_fallback_router(config: dict | None = None) -> Handler:
         # model treat it as a general question (argmax = text, no call)
         if "weather" in lower or "forecast" in lower or "temperature" in lower:
             return "weather"
+        # "Tell me about the screenshot I just took" — the tool grammar in
+        # training was live-screen questions; the screenshot phrasing is OOD
+        if "screenshot" in lower or "screen shot" in lower:
+            return "screen"
+        # "Find my resume" / "where is my budget file" — no model token for
+        # file search (like memory), so the keyword router is its only path.
+        # Checked after the other tools so their phrasings win first.
+        if extract_file_query(message) is not None:
+            return "files"
+        # "Remind me to go for a run in an hour" — reminder CREATE phrasing was
+        # never trained (the model saw only a couple of READ prompts), so it
+        # falls to chat and produces garbage; casing variants of reads miss too.
+        # Checked after weather so "remind me what the weather is" stays weather.
+        if extract_reminder(message) is not None \
+                or extract_reminder_list(message) is not None \
+                or "reminder" in lower or "to-do" in lower or "to do list" in lower:
+            return "reminders"
         if _is_capability_question(message):
             return "chat"
         return None if model_chat else "chat"
@@ -324,8 +497,9 @@ _GREETINGS = ("hello", "hi", "hey", "yo", "sup", "good morning",
               "good afternoon", "good evening", "what's up", "whats up")
 
 _CAPABILITIES = ("I can check your calendar, reminders, weather, news, and "
-                 "stocks, read your notes, describe your screen, play music "
-                 "on Spotify, and remember what we've talked about.")
+                 "stocks, read your notes, describe your screen, find your "
+                 "files, play music on Spotify, and remember what we've "
+                 "talked about.")
 
 
 def _is_greeting(message: str) -> bool:
@@ -386,6 +560,19 @@ def extract_location(message: str) -> str | None:
     return match.group(1).rstrip("?!.") if match else None
 
 
+def build_reprompts() -> dict[str, Callable[[str], str]]:
+    """Tool → prompt-builder for the dispatcher's reprompt mode: the real
+    result becomes a fresh chat prompt, answered with the model's preserved
+    instruct ability. For tools whose result should be understood, not
+    recited — the user asked what's HAPPENING on screen, not for a read-back
+    of the app list."""
+    def screen_prompt(result: str) -> str:
+        return (f"{result}\n"
+                "Based on that, tell me in one or two sentences what I'm "
+                "looking at and what's happening.")
+    return {"screen": screen_prompt}
+
+
 def build_verbatim() -> dict[str, Handler]:
     """Tool → reply template for the dispatcher's verbatim mode.
 
@@ -400,6 +587,7 @@ def build_verbatim() -> dict[str, Handler]:
         "spotify": _spotify_reply,
         "stocks": _stocks_reply,
         "launcher": _launcher_reply,
+        "files": lambda result: result,   # handler already returns a sentence
         "memory": lambda result: result,  # handler already returns a sentence
         "chat": lambda result: result,
     }

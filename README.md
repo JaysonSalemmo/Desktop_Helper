@@ -1,78 +1,101 @@
 # Desktop Helper
 
-A conversational desktop assistant powered by an original language model trained from scratch. The model is a GPT-style transformer (~350M parameters) built and trained in PyTorch — not a fine-tune, not an API wrapper.
+A local, private macOS assistant powered by a language model we fine-tuned ourselves. It lives in your menu bar, answers in natural language, and calls real system tools — calendar, reminders, notes, weather, news, stocks, Spotify, screen reading, file search, and an app launcher — fetching live data at query time. Everything runs on your Mac; nothing is sent to the cloud.
 
 ## How It Works
 
-The model handles language (understanding your question, forming a response). Live data — your calendar, files, screen — is fetched at query time via tools the model learns to call during training.
+The model handles language (understanding your question, forming a reply). Live data is fetched at query time via tools the model learned to call during fine-tuning: it emits a `[CALL: tool]` token, the app runs the real tool and injects `[RESULT]…[/RESULT]`, and the model continues from real data.
 
 ```
-You:       "What's on my calendar today?"
-Model:     [CALL: calendar]
-App:       → reads calendar → returns events
-Model:     "You have standup at 9am and lunch at 12pm."
+You:    "What's on my calendar today?"
+Model:  [CALL: calendar]
+App:    → reads EventKit → "Standup at 9am, Lunch at 12pm"
+Model:  "You've got standup at 9am and lunch at noon."
 ```
 
 ## Features
 
-- **Conversational chat** — natural Q&A via a Textual TUI
+- **Conversational chat** — natural Q&A from a menu-bar reply panel (a Textual TUI is also available)
 - **Calendar** — reads today's events via macOS EventKit
-- **Screen capture** — takes a screenshot and describes what's on screen
-- **Reminders & notes** — read and create reminders/notes
-- **App launcher** — open allowed apps by name
-- **Spotify control** — play, pause, skip
+- **Reminders** — read your to-dos, and create new ones ("remind me to…")
+- **Notes** — jot and read quick notes
+- **Screen reading** — screenshots the screen, OCRs it on-device (Apple Vision), and describes what's on it
+- **File finder** — locate your files by name via Spotlight
+- **Weather · News · Stocks** — live conditions, headlines, and quotes
+- **App launcher** — open apps from a configured allowlist by name
+- **Spotify control** — play, pause, skip, volume, current track
 - **Startup briefing** — weather, news, and calendar summary on launch
-- **Voice input** — local transcription via faster-whisper
+- **Voice input** — hold a hotkey to talk; transcribed locally with faster-whisper
 - **Persistent memory** — conversation history via ChromaDB
-- **Hotkeys & menubar** — quick access from anywhere on the desktop
+- **Global hotkey & menu bar** — summon it from anywhere; ships as a self-contained `.app`
 
-## Model
+## The Model
+
+The architecture is implemented from scratch in our own PyTorch — Llama-style: RoPE, RMSNorm, SwiGLU. The pretrained weights come from **SmolLM2-1.7B-Instruct** (Apache 2.0), transplanted into that architecture (and verified logit-equivalent to the reference), then **fine-tuned** on synthetic tool-use data so the model learns the `[CALL: tool]` routing while keeping its conversational ability.
 
 | Property | Value |
 |---|---|
-| Architecture | GPT-style decoder-only transformer |
-| Parameters | ~350M |
-| Framework | PyTorch |
-| Tool calling | Special tokens (`[CALL: <tool>]` / `[RESULT: ...]`) |
-| Training hardware | NVIDIA RTX GPU (CUDA) |
-| Inference | Mac Apple Silicon (MPS) or NVIDIA (CUDA) |
+| Architecture | Decoder-only transformer, Llama-style (RoPE, RMSNorm, SwiGLU) |
+| Parameters | ~1.7B |
+| Base weights | SmolLM2-1.7B-Instruct (transplanted, then fine-tuned) |
+| Tool calling | Special tokens (`[CALL: <tool>]` / `[RESULT]…[/RESULT]`) |
+| Training | Google Colab GPU (fine-tune + an embeddings-only warm start) |
+| Inference | Apple Silicon (MPS) with a per-turn KV cache |
+
+Earlier eras — an OPT-350M version, and before that an abandoned train-from-scratch attempt — are preserved on the `opt-350m` branch and chronicled in `docs/TIMELINE.md`.
 
 ## Stack
 
 | Purpose | Library |
 |---|---|
-| Model | PyTorch + torch.compile |
-| Training utilities | HuggingFace Accelerate |
-| UI | Textual |
+| Model | PyTorch |
+| Tokenizer | HuggingFace Transformers / Tokenizers |
+| Menu-bar app | rumps + AppKit (pyobjc) |
+| Global hotkey | Carbon `RegisterEventHotKey` (via ctypes — no Accessibility needed) |
+| Screen OCR | Apple Vision (pyobjc) |
 | Voice input | faster-whisper |
 | Memory | ChromaDB |
 | Calendar / Reminders | pyobjc EventKit |
 | Stocks | yfinance |
-| Hotkeys | pynput |
-| Menubar | rumps |
+| Packaging | PyInstaller (self-contained `.app`) |
+| TUI (optional) | Textual |
 
 ## Setup
 
 ```bash
 cp config.example.json config.json
-# Edit config.json with your name and preferences
+# edit config.json — your name, allowed apps, location, feature toggles
 uv sync
-uv run python -m src.main
+uv run python -m src.menubar     # menu-bar app (primary)
+# uv run python -m src.main      # optional Textual TUI
 ```
+
+The model checkpoint (gitignored) goes in `model/checkpoints/`. To build and install the standalone app:
+
+```bash
+uv run python scripts/freeze_app.py --install    # builds + installs Desktop Helper.app
+```
+
+When frozen, config and the checkpoint live in `~/Library/Application Support/Desktop Helper/`.
 
 ## Project Structure
 
 ```
 src/
-  assistant/          # Model inference and tool dispatch
-  calendar_integration/
-  screen_capture/
-  reminders/
-  notes/
-  spotify/
-  launcher/
-  memory/
-  ui/                 # Textual TUI
+  assistant/            # model inference + tool dispatch (engine, dispatcher, tools)
+  menubar/              # menu-bar app, reply panel, global hotkey
+  calendar_integration/ reminders/ notes/   # EventKit calendar/reminders + notes
+  eventkit/             # shared EKEventStore
+  screen_capture/       # screenshot + Vision OCR
+  file_finder/          # Spotlight search
+  weather/ news/ stocks/ spotify/           # live-data tools
+  briefing/             # startup summary
+  voice/                # push-to-talk transcription
+  memory/               # ChromaDB history
+  ui/                   # Textual TUI (optional)
+  paths.py  applog.py   # frozen-app paths + logging
   config/
-model/                # Transformer architecture and training (coming)
+model/                  # from-scratch transformer, tokenizer, training, checkpoints
+scripts/                # freeze_app.py (build the .app), make_signing_cert.sh
+docs/TIMELINE.md        # era-by-era history and measured results
 ```

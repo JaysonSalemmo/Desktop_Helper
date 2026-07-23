@@ -234,6 +234,85 @@ def test_fallback_router_rescues_unrouted_messages():
     assert result.tool is None
 
 
+def test_pre_router_forces_tool_without_running_model():
+    tok = _tokenizer()
+    # the model, if consulted, would emit a (wrong) tool call — but the
+    # pre-router must short-circuit before any forward pass happens
+    model = ScriptedModel([tok.tool_token_id("stocks"), tok.eos_id], tok.vocab_size)
+    d = ToolDispatcher(
+        model, tok, {"files": lambda m: "Found 1 file: resume.pdf (~/Downloads)"},
+        device=torch.device("cpu"), top_k=1,
+        verbatim={"files": lambda r: r},
+        pre_router=lambda m: "files" if "file" in m.lower() else None,
+    )
+    result = d.respond("where is my resume file")
+    assert result.tool == "files"
+    assert result.response == "Found 1 file: resume.pdf (~/Downloads)"
+    assert model.i == 0  # model never ran — pre-router short-circuited
+
+    # a non-matching message falls through to normal model routing
+    model2 = ScriptedModel([tok.tool_token_id("stocks"), tok.eos_id], tok.vocab_size)
+    d.model = model2.eval()
+    assert d.respond("how are my stocks").tool == "stocks"
+    assert model2.i > 0
+
+
+def test_reprompt_tool_answers_with_fresh_chat_generation():
+    tok = _tokenizer()
+    word = tok.encode("interesting")[0]
+    # script: [CALL: screen] (routing) → then the description generation
+    script = [tok.tool_token_id("screen"), word, tok.eos_id]
+    model = ScriptedModel(script, tok.vocab_size)
+    prompts = []
+
+    def screen_prompt(result: str) -> str:
+        prompts.append(result)
+        return f"Describe: {result}"
+
+    d = ToolDispatcher(model, tok, {"screen": lambda m: "Code in front"},
+                       device=torch.device("cpu"), top_k=1,
+                       reprompt={"screen": screen_prompt})
+    result = d.respond("What's happening on my screen?")
+
+    assert result.tool == "screen"
+    assert result.tool_result == "Code in front"
+    assert prompts == ["Code in front"]          # prompt built from real result
+    # reply comes from the second generation, not injection-and-resume
+    assert result.response == tok.decode([word], skip_special=True).strip()
+
+
+def test_reprompt_generation_masks_tool_tokens():
+    tok = _tokenizer()
+    # the description generation immediately tries to emit another tool call;
+    # masking must stop it — the handler runs exactly once, no recursion
+    calls = []
+    script = [tok.tool_token_id("screen"), tok.tool_token_id("screen"), tok.eos_id]
+    model = ScriptedModel(script, tok.vocab_size)
+    d = ToolDispatcher(model, tok, {"screen": lambda m: calls.append(m) or "x"},
+                       device=torch.device("cpu"), top_k=1,
+                       reprompt={"screen": lambda r: r})
+    result = d.respond("screen?")
+    assert result.tool == "screen"
+    assert len(calls) == 1
+    assert "[CALL" not in result.response
+
+
+def test_fallback_routed_reprompt_tool_also_describes():
+    tok = _tokenizer()
+    word = tok.encode("hello")[0]
+    desc = tok.encode("photos")[0]
+    # model declines to route (plain word first) → fallback fires "screen" →
+    # reprompt generation produces the description
+    model = ScriptedModel([word, desc, tok.eos_id], tok.vocab_size)
+    d = ToolDispatcher(model, tok, {"screen": lambda m: "Text in screenshot x.png: y"},
+                       device=torch.device("cpu"), top_k=1,
+                       reprompt={"screen": lambda r: f"Describe: {r}"},
+                       fallback_router=lambda m: "screen" if "screenshot" in m else None)
+    result = d.respond("Tell me about the screenshot I just took")
+    assert result.tool == "screen"
+    assert result.response == tok.decode([desc], skip_special=True).strip()
+
+
 def test_unregistered_tool_falls_back_gracefully():
     tok = _tokenizer()
     script = [tok.tool_token_id("weather"), tok.eos_id]

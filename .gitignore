@@ -15,3 +15,8 @@ model/checkpoints/
 logs/
 wandb/
 *.app/
+
+# PyInstaller freeze output (large; rebuilt via scripts/freeze_app.py)
+build/
+dist/
+*.spec.bak

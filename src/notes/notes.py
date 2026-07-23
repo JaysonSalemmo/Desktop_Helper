@@ -4,9 +4,12 @@ Saves timestamped notes to a local JSON file.
 """
 import json
 from datetime import datetime
-from pathlib import Path
 
-NOTES_PATH = Path(__file__).parent.parent.parent / "data" / "notes.json"
+from src.paths import user_data_path
+
+# writable per-user data (Application Support when frozen, project dir from
+# source) — a project-relative path would write into the read-only .app bundle
+NOTES_PATH = user_data_path("data", "notes.json")
 
 
 def _load() -> list:
@@ -33,8 +36,3 @@ def get_today() -> list[dict]:
     """Return all notes from today."""
     today = datetime.now().date().isoformat()
     return [n for n in _load() if n["timestamp"].startswith(today)]
-
-
-def summarize() -> str:
-    """Summarize today's notes — will be routed through the local model (Phase 4)."""
-    raise NotImplementedError("Note summarization not yet wired to local model.")

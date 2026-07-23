@@ -1,38 +1,37 @@
 """
-Global hotkey via a raw Quartz event tap — replaces pynput.
+Global hotkey via Carbon's RegisterEventHotKey — needs NO Accessibility.
 
-Why not pynput: its macOS backend converts every tapped CGEvent into an
-NSEvent on the listener thread; on macOS 15 the Caps Lock / input-source
-path inside that conversion asserts it's on the main dispatch queue and
-SIGTRAPs the whole process (observed live 2026-07-18). We only need
-"is this keycode + these modifiers", which the raw CGEvent answers without
-any AppKit involvement.
+History: this was a raw Quartz CGEventTap. That works, but an active event tap
+requires the Accessibility permission (TCC), which for an ad-hoc/self-signed
+frozen .app was endless pain — the grant resets on every rebuild/re-sign, is
+hard to verify, and silently no-ops when the signature or entry is stale. The
+tap would fall through (the keystroke typed into the focused app, or an AppKit
+menu key-equivalent firing only while our app was frontmost).
 
-The tap is ACTIVE: matched hotkey events are consumed (otherwise the
-keystroke also lands in whatever has focus — e.g. a space typed into the
-panel's follow-up field); unmatched events pass through untouched. The
-callback is a few integer compares, so keyboard latency is unaffected.
-Needs the same Accessibility permission pynput did; tap creation fails
-cleanly (ok=False) when it's missing.
+RegisterEventHotKey is the API built for exactly this: register a specific
+system-wide hotkey, get a Carbon event when it's pressed, and the key is
+consumed for you. It needs no permission at all — it's how classic menu-bar
+hotkey apps (Alfred, etc.) always did it. Carbon is a system framework loaded
+via ctypes, so it behaves identically in the frozen bundle.
+
+The handler is dispatched on the main thread by the app's Carbon/Cocoa event
+loop (rumps runs NSApplication), so registration happens on the main thread and
+callbacks arrive there too.
 """
-import threading
+import ctypes
+import ctypes.util
+from ctypes import (CFUNCTYPE, POINTER, Structure, byref, c_int32, c_uint32,
+                    c_ulong, c_void_p, sizeof)
 
-import Quartz
+_carbon = ctypes.CDLL(ctypes.util.find_library("Carbon"))
 
-_MODIFIERS = {
-    "ctrl": Quartz.kCGEventFlagMaskControl,
-    "control": Quartz.kCGEventFlagMaskControl,
-    "cmd": Quartz.kCGEventFlagMaskCommand,
-    "alt": Quartz.kCGEventFlagMaskAlternate,
-    "option": Quartz.kCGEventFlagMaskAlternate,
-    "shift": Quartz.kCGEventFlagMaskShift,
+# Carbon modifier masks used by RegisterEventHotKey (NOT the CGEvent flags)
+_CARBON_MODIFIERS = {
+    "cmd": 0x0100, "command": 0x0100,
+    "shift": 0x0200,
+    "alt": 0x0800, "option": 0x0800,
+    "ctrl": 0x1000, "control": 0x1000,
 }
-
-# all modifier bits we consider when matching — a binding matches only if its
-# required modifiers are pressed AND no other of these are (exact matching, so
-# ctrl+space doesn't also fire on ctrl+shift+space)
-_RELEVANT_FLAGS = (Quartz.kCGEventFlagMaskControl | Quartz.kCGEventFlagMaskCommand
-                   | Quartz.kCGEventFlagMaskAlternate | Quartz.kCGEventFlagMaskShift)
 
 # kVK_* virtual keycodes (letters, digits, space, function keys)
 _KEYCODES = {
@@ -49,98 +48,136 @@ _FUNCTION_KEYCODES = {_KEYCODES[f"f{n}"] for n in range(1, 13)}
 
 
 def parse_combo(combo: str) -> tuple[int, int]:
-    """"<ctrl>+<space>" (pynput syntax, as in config) → (keycode, flag mask).
+    """"<ctrl>+<space>" (pynput syntax, as in config) → (keycode, Carbon mods).
 
     Function keys may be bound bare ("<f10>"); everything else needs at least
     one modifier so ordinary typing can't trigger the assistant."""
     keycode = None
-    flags = 0
+    mods = 0
     for token in combo.lower().split("+"):
         token = token.strip().strip("<>")
-        if token in _MODIFIERS:
-            flags |= _MODIFIERS[token]
+        if token in _CARBON_MODIFIERS:
+            mods |= _CARBON_MODIFIERS[token]
         elif token in _KEYCODES:
             keycode = _KEYCODES[token]
         else:
             raise ValueError(f"unsupported hotkey token: {token!r}")
     if keycode is None:
         raise ValueError(f"hotkey needs a key: {combo!r}")
-    if flags == 0 and keycode not in _FUNCTION_KEYCODES:
+    if mods == 0 and keycode not in _FUNCTION_KEYCODES:
         raise ValueError(f"non-function keys need at least one modifier: {combo!r}")
-    return keycode, flags
+    return keycode, mods
 
 
-def flags_match(event_flags: int, required: int) -> bool:
-    """Exact modifier match over the relevant bits."""
-    return (event_flags & _RELEVANT_FLAGS) == required
+# glyphs for showing a combo as menu text (display only — RegisterEventHotKey
+# does the actual work, so these are NOT functional NSMenuItem keyEquivalents)
+_SYMBOLS = {"ctrl": "⌃", "control": "⌃", "alt": "⌥", "option": "⌥",
+            "shift": "⇧", "cmd": "⌘", "command": "⌘", "space": "Space"}
 
 
-# NSEvent modifier masks — for DISPLAYING combos as native menu shortcuts
-_NS_MODMASKS = {"ctrl": 1 << 18, "control": 1 << 18, "cmd": 1 << 20,
-                "alt": 1 << 19, "option": 1 << 19, "shift": 1 << 17}
-
-
-def combo_display(combo: str) -> tuple[str, int] | None:
-    """Combo → (keyEquivalent char, NSEvent modifier mask) so menu items can
-    show the shortcut natively (dim, right-aligned). Display only — the event
-    tap consumes matched combos before the app would ever see them."""
-    char = None
-    mask = 0
+def combo_symbols(combo: str) -> str:
+    """"<ctrl>+<shift>+<space>" → "⌃⇧Space" for a menu-item label."""
+    parts = []
     for token in combo.lower().split("+"):
         token = token.strip().strip("<>")
-        if token in _NS_MODMASKS:
-            mask |= _NS_MODMASKS[token]
-        elif token == "space":
-            char = " "
-        elif len(token) == 1:
-            char = token
-        elif token.startswith("f") and token[1:].isdigit():
-            char = chr(0xF704 + int(token[1:]) - 1)  # NSF1FunctionKey + n
-    return (char, mask) if char else None
+        parts.append(_SYMBOLS.get(token, token.upper() if len(token) == 1 else token))
+    return "".join(parts)
 
 
-class HotkeyListener(threading.Thread):
-    """One event tap serving multiple keybinds. `bindings` is a list of
-    (keycode, flags, callback); callbacks fire from this thread — hop to main
-    yourself. Daemon thread; lives for the app's lifetime."""
+# --- Carbon event plumbing (ctypes) ---
+class _EventTypeSpec(Structure):
+    _fields_ = [("eventClass", c_uint32), ("eventKind", c_uint32)]
+
+
+class _EventHotKeyID(Structure):
+    _fields_ = [("signature", c_uint32), ("id", c_uint32)]
+
+
+_kEventClassKeyboard = 0x6b657962      # 'keyb'
+_kEventHotKeyPressed = 6
+_kEventParamDirectObject = 0x2d2d2d2d  # '----'
+_typeEventHotKeyID = 0x686b6964        # 'hkid'
+_HOTKEY_SIGNATURE = 0x44534852         # 'DSHR'
+_noErr = 0
+
+# OSStatus handler(EventHandlerCallRef, EventRef, void *userData)
+_HANDLER_FUNC = CFUNCTYPE(c_int32, c_void_p, c_void_p, c_void_p)
+
+_carbon.GetApplicationEventTarget.restype = c_void_p
+_carbon.RegisterEventHotKey.argtypes = [c_uint32, c_uint32, _EventHotKeyID,
+                                        c_void_p, c_uint32, POINTER(c_void_p)]
+_carbon.RegisterEventHotKey.restype = c_int32
+_carbon.UnregisterEventHotKey.argtypes = [c_void_p]
+_carbon.UnregisterEventHotKey.restype = c_int32
+_carbon.InstallEventHandler.argtypes = [c_void_p, c_void_p, c_uint32,
+                                        POINTER(_EventTypeSpec), c_void_p,
+                                        POINTER(c_void_p)]
+_carbon.InstallEventHandler.restype = c_int32
+_carbon.GetEventParameter.argtypes = [c_void_p, c_uint32, c_uint32, c_void_p,
+                                      c_ulong, c_void_p, c_void_p]
+_carbon.GetEventParameter.restype = c_int32
+
+
+class HotkeyListener:
+    """Registers global hotkeys via Carbon. `bindings` is a list of
+    (keycode, carbon_modifiers, callback). MUST be started on the main thread;
+    callbacks fire on the main thread (the app's Carbon event loop dispatches
+    them). `ok` mirrors the old tap interface: True once at least one hotkey
+    registered, False on failure."""
 
     def __init__(self, bindings: list[tuple[int, int, object]]):
-        super().__init__(daemon=True, name="hotkey-tap")
         self.bindings = bindings
-        self.ok = None  # None = starting, True = tap live, False = no permission
+        self.ok = None  # None = not started, True = registered, False = failed
+        self._by_id: dict[int, object] = {}
+        self._refs: list[c_void_p] = []
+        self._handler = None  # keep the CFUNCTYPE alive or the callback is GC'd
 
-    def run(self) -> None:
-        def callback(proxy, event_type, event, refcon):
-            if event_type == Quartz.kCGEventTapDisabledByTimeout:
-                Quartz.CGEventTapEnable(tap, True)
-                return event
-            if event_type == Quartz.kCGEventKeyDown:
-                keycode = Quartz.CGEventGetIntegerValueField(
-                    event, Quartz.kCGKeyboardEventKeycode)
-                flags = Quartz.CGEventGetFlags(event)
-                for want_key, want_flags, on_press in self.bindings:
-                    if keycode == want_key and flags_match(flags, want_flags):
-                        try:
-                            on_press()
-                        except Exception:
-                            pass  # a callback error must never take down the tap
-                        return None  # consume — don't also type into the focused app
-            return event
-
-        tap = Quartz.CGEventTapCreate(
-            Quartz.kCGSessionEventTap,
-            Quartz.kCGHeadInsertEventTap,
-            Quartz.kCGEventTapOptionDefault,
-            Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown),
-            callback,
-            None,
-        )
-        if tap is None:  # Accessibility permission not granted
+    def start(self) -> None:
+        from src.applog import get_logger
+        log = get_logger()
+        try:
+            target = _carbon.GetApplicationEventTarget()
+            self._handler = _HANDLER_FUNC(self._on_event)  # stored → not GC'd
+            spec = _EventTypeSpec(_kEventClassKeyboard, _kEventHotKeyPressed)
+            handler_ref = c_void_p()
+            status = _carbon.InstallEventHandler(target, self._handler, 1,
+                                                 byref(spec), None,
+                                                 byref(handler_ref))
+            if status != _noErr:
+                self.ok = False
+                log.warning("hotkey handler install failed (status %d)", status)
+                return
+            for i, (keycode, mods, callback) in enumerate(self.bindings, start=1):
+                hk_id = _EventHotKeyID(_HOTKEY_SIGNATURE, i)
+                ref = c_void_p()
+                status = _carbon.RegisterEventHotKey(keycode, mods, hk_id,
+                                                     target, 0, byref(ref))
+                if status != _noErr:
+                    log.warning("RegisterEventHotKey failed for binding %d "
+                                "(status %d)", i, status)
+                    continue
+                self._by_id[i] = callback
+                self._refs.append(ref)
+            self.ok = bool(self._by_id)
+            log.info("hotkey registered: %d/%d bindings live (no Accessibility "
+                     "needed)", len(self._by_id), len(self.bindings))
+        except Exception:
             self.ok = False
-            return
-        source = Quartz.CFMachPortCreateRunLoopSource(None, tap, 0)
-        Quartz.CFRunLoopAddSource(Quartz.CFRunLoopGetCurrent(), source,
-                                  Quartz.kCFRunLoopCommonModes)
-        Quartz.CGEventTapEnable(tap, True)
-        self.ok = True
-        Quartz.CFRunLoopRun()
+            log.exception("hotkey registration crashed")
+
+    def _on_event(self, call_ref, event, user_data) -> int:
+        try:
+            hk_id = _EventHotKeyID()
+            _carbon.GetEventParameter(event, _kEventParamDirectObject,
+                                      _typeEventHotKeyID, None,
+                                      sizeof(hk_id), None, byref(hk_id))
+            callback = self._by_id.get(hk_id.id)
+            if callback is not None:
+                callback()
+        except Exception:
+            pass  # a callback error must never propagate into the Carbon loop
+        return _noErr
+
+    def start_thread_safe(self) -> None:
+        # kept for interface parity with the old threaded listener
+        self.start()

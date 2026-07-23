@@ -5,24 +5,22 @@ from src.voice import voice
 from src.voice.wakeword import FRAME, capture_until_silence
 
 
-def test_parse_combo_and_flag_matching():
-    import Quartz
-    from src.menubar.hotkey import flags_match, parse_combo
+def test_parse_combo_to_carbon_modifiers():
+    from src.menubar.hotkey import combo_symbols, parse_combo
 
-    ctrl = Quartz.kCGEventFlagMaskControl
-    shift = Quartz.kCGEventFlagMaskShift
-    alt = Quartz.kCGEventFlagMaskAlternate
-
-    assert parse_combo("<ctrl>+<space>") == (49, ctrl)
-    assert parse_combo("<ctrl>+<alt>+<space>") == (49, ctrl | alt)
+    # parse_combo → (keycode, Carbon modifier mask); Carbon masks:
+    # control 0x1000, shift 0x0200, option 0x0800, command 0x0100
+    assert parse_combo("<ctrl>+<space>") == (49, 0x1000)
+    assert parse_combo("<ctrl>+<alt>+<space>") == (49, 0x1000 | 0x0800)
+    assert parse_combo("<ctrl>+<shift>+<space>") == (49, 0x1000 | 0x0200)
     assert parse_combo("<f10>") == (109, 0)  # function keys may be bare
     with pytest.raises(ValueError):
         parse_combo("<space>")  # ordinary keys need a modifier
 
-    # exact matching: ctrl+space must NOT fire on ctrl+shift+space
-    assert flags_match(ctrl, ctrl)
-    assert not flags_match(ctrl | shift, ctrl)
-    assert flags_match(ctrl | shift, ctrl | shift)
+    # display glyphs for menu labels (display only — RegisterEventHotKey does
+    # the real work, no functional keyEquivalent)
+    assert combo_symbols("<ctrl>+<shift>+<space>") == "⌃⇧Space"
+    assert combo_symbols("<ctrl>+<option>+<space>") == "⌃⌥Space"
 
 
 def _frame_feeder(frames):

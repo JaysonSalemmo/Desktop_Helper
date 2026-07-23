@@ -216,6 +216,14 @@ def test_fallback_router_covers_weather_and_spotify():
     # …but capability questions stay canned: the model invents features
     assert fallback("What can you do?") == "chat"
     assert fallback("help") == "chat"
+    # screenshot phrasing is outside the training grammar → keyword net
+    assert fallback("Tell me about the screenshot I just took") == "screen"
+    assert fallback("what's in my last screen shot?") == "screen"
+    # reminder create phrasing + casing/list read variants the model misses
+    assert fallback("Remind me to go for a run in an hour") == "reminders"
+    assert fallback("check my reminders") == "reminders"
+    assert fallback("what's on my Work list?") == "reminders"
+    assert fallback("remind me what the weather is") == "weather"  # weather wins
     # model_chat=false opts all unrouted chat back into canned replies
     canned = build_fallback_router({"features": {"model_chat": False}})
     assert canned("Hello there!") == "chat"
@@ -238,7 +246,7 @@ def test_verbatim_replies_template_and_passthrough():
 
     v = build_verbatim()
     assert set(v) == {"calendar", "reminders", "notes", "spotify", "stocks",
-                      "launcher", "memory", "chat"}
+                      "launcher", "files", "memory", "chat"}
     assert v["launcher"]("VS Code launched") == "VS Code is open."
     assert v["launcher"]("Now playing: X by Y") == "Now playing: X by Y"
     assert v["spotify"]("Love All (with JAY-Z) by Drake") == \
@@ -284,6 +292,138 @@ def test_launcher_delegates_play_requests_to_spotify(monkeypatch):
     assert tools.launcher.match_app("Open Spotify", config["allowed_apps"]) is not None
 
 
+def test_screen_handler_screenshot_intent(monkeypatch, tmp_path):
+    from src.assistant import tools
+    from src.assistant.tools import build_handlers
+
+    config = {
+        "features": {},
+        "allowed_apps": [],
+        "stocks": {"watchlist": []},
+        "news": {"rss_feeds": []},
+        "weather": {"location": "Nowhere"},
+    }
+    shot = tmp_path / "Screenshot test.png"
+    monkeypatch.setattr(tools.capture, "latest_screenshot", lambda: shot)
+    monkeypatch.setattr(tools.capture, "describe_image",
+                        lambda p: f"Text visible in the screenshot {p.name}: hi")
+    monkeypatch.setattr(tools.capture, "describe", lambda: "Live screen")
+
+    handlers = build_handlers(config)
+    # screenshot phrasing → the user's own file, not a live capture
+    assert "Screenshot test.png" in handlers["screen"]("describe the screenshot I took")
+    # live phrasing → live capture
+    assert handlers["screen"]("what's on my screen?") == "Live screen"
+    # no screenshots on disk → honest fallback message
+    monkeypatch.setattr(tools.capture, "latest_screenshot", lambda: None)
+    assert "No screenshots found" in handlers["screen"]("my latest screenshot?")
+
+
+def test_extract_file_query():
+    from src.assistant.tools import extract_file_query
+
+    # possessive locate phrases + explicit file nouns extract the term
+    assert extract_file_query("Find my resume.") == "resume"
+    assert extract_file_query("Where is my budget spreadsheet") == "budget"
+    assert extract_file_query("Show me the files named tax") == "tax"
+    assert extract_file_query("locate report.pdf") == "report.pdf"
+    assert extract_file_query("find my tax documents") == "tax"
+    # an extension alone signals a file request (no possessive needed)
+    assert extract_file_query("find invoice.pdf") == "invoice.pdf"
+    # not a file request → None (must not steal generic questions)
+    assert extract_file_query("Where is the coffee shop?") is None
+    assert extract_file_query("find a good time to meet") is None
+    assert extract_file_query("What's the weather?") is None
+    assert extract_file_query("find my files") is None  # bare noun, no term
+
+
+def test_pre_router_forces_unambiguous_file_queries():
+    from src.assistant.tools import build_pre_router
+
+    pre = build_pre_router()
+    # explicit file noun or a real extension → force files (override model)
+    assert pre("where is my resume file") == "files"
+    assert pre("find my budget document") == "files"
+    assert pre("locate invoice.pdf") == "files"
+    # softer phrasing (no noun/extension) → let the model try; fallback nets it
+    assert pre("find my resume") is None
+    assert pre("where is my budget") is None
+    # not a file query at all → None
+    assert pre("what's the weather in Tokyo") is None
+    assert pre("remind me to call mom") is None
+
+
+def test_fallback_router_routes_file_search():
+    from src.assistant.tools import build_fallback_router
+
+    fallback = build_fallback_router()
+    assert fallback("Find my resume") == "files"
+    assert fallback("where is my budget file") == "files"
+    # generic questions still fall through to the model, not files
+    assert fallback("Where is the nearest coffee shop?") is None
+
+
+def test_files_handler_searches_and_reports(monkeypatch):
+    from src.assistant import tools
+    from src.assistant.tools import build_handlers
+
+    config = {"features": {}, "allowed_apps": [], "stocks": {"watchlist": []},
+              "news": {"rss_feeds": []}, "weather": {"location": "X"},
+              "files": {"max_results": 2}}
+    captured = {}
+    monkeypatch.setattr(tools.files, "find",
+                        lambda q, n: captured.update(q=q, n=n) or f"Found: {q}")
+    handlers = build_handlers(config)
+
+    assert handlers["files"]("Find my resume") == "Found: resume"
+    assert captured == {"q": "resume", "n": 2}  # term extracted, max_results passed
+    # no extractable term → asks for one, never shells out
+    assert "part of the file name" in handlers["files"]("find my files")
+
+
+def test_extract_reminder():
+    from src.assistant.tools import (extract_reminder, extract_reminder_list,
+                                     strip_due_text)
+
+    # create intent → (reminder text, list name or None); read → None
+    assert extract_reminder("Remind me to call the dentist") == ("call the dentist", None)
+    assert extract_reminder("set a reminder to buy milk") == ("buy milk", None)
+    assert extract_reminder("What are my reminders?") is None
+
+    # list targeting — matched against the user's actual lists at runtime
+    assert extract_reminder("remind me to buy milk on my Groceries list") \
+        == ("buy milk", "Groceries")
+    assert extract_reminder("add a reminder to finish the report to my Work list") \
+        == ("finish the report", "Work")
+    # list name on a READ request too
+    assert extract_reminder_list("what's on my Work list?") == "Work"
+    assert extract_reminder_list("check my reminders") is None
+
+    # the due-date phrase is stripped from the title (components come from
+    # NSDataDetector separately), including any dangling connector word
+    assert strip_due_text("call the dentist tomorrow at 3pm", "tomorrow at 3pm") \
+        == "call the dentist"
+    assert strip_due_text("buy milk", None) == "buy milk"
+
+
+def test_reminders_reply_passes_through_create_confirmation():
+    from src.assistant.tools import build_verbatim
+
+    reply = build_verbatim()["reminders"]
+    assert reply("Reminder added: buy milk") == "Reminder added: buy milk"
+    assert reply("Return library books") == "Your reminders: Return library books."
+    assert reply("No reminders set") == "You don't have any reminders set."
+
+
+def test_reprompt_builder_covers_screen():
+    from src.assistant.tools import build_reprompts
+
+    reprompts = build_reprompts()
+    prompt = reprompts["screen"]("Code in front. On screen: def main():")
+    assert "Code in front. On screen: def main():" in prompt
+    assert "what I'm looking at" in prompt
+
+
 def test_build_handlers_respects_feature_flags():
     from src.assistant.tools import build_handlers
 
@@ -297,7 +437,7 @@ def test_build_handlers_respects_feature_flags():
     handlers = build_handlers(config)
     assert set(handlers) == {
         "spotify", "calendar", "screen", "reminders", "notes",
-        "launcher", "weather", "news", "stocks", "memory", "chat",
+        "launcher", "weather", "news", "stocks", "files", "memory", "chat",
     }
     assert handlers["weather"]("any") == "weather is disabled in config"
     assert handlers["screen"]("any") == "screen is disabled in config"
