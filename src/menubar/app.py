@@ -68,7 +68,10 @@ class DesktopHelperMenuBar(rumps.App):
 
         self.status_item = rumps.MenuItem("Loading model…")  # no callback → non-clickable
         self.ask_item = rumps.MenuItem("Ask…", callback=self._ask_clicked)
-        menu = [self.ask_item]
+        # reopens the chat window; greyed while it's already showing (a callback
+        # of None renders disabled — see _panel_visibility)
+        self.show_chat_item = rumps.MenuItem("Show Chat", callback=self._show_chat_clicked)
+        menu = [self.ask_item, self.show_chat_item]
         if self.voice_enabled:
             self.speak_item = rumps.MenuItem("Speak", callback=self._toggle_voice)
             menu.append(self.speak_item)
@@ -344,8 +347,17 @@ class DesktopHelperMenuBar(rumps.App):
             if self.voice_enabled:
                 actions["Speak"] = lambda: self._toggle_voice(None)
             actions["Briefing"] = lambda: self._briefing_clicked(None)
-            self._panel = ReplyPanel(on_followup=self._followup, actions=actions)
+            self._panel = ReplyPanel(on_followup=self._followup, actions=actions,
+                                     on_visibility=self._panel_visibility)
         return self._panel
+
+    def _panel_visibility(self, visible: bool) -> None:
+        """Grey out 'Show Chat' while the window is showing, restore it when
+        hidden (a None callback renders the item disabled in rumps)."""
+        self.show_chat_item.set_callback(None if visible else self._show_chat_clicked)
+
+    def _show_chat_clicked(self, _sender=None) -> None:
+        self._get_panel().present()
 
     def _show_alert(self, title: str, body: str) -> None:
         """Non-modal reply panel (replaced the modal NSAlert flow — nothing
