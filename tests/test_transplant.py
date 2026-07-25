@@ -49,7 +49,7 @@ def test_embedding_table_matches_tokenizer():
     # explodes when a tool-token id (49152+) is actually used
     from model.tokenizer import DesktopHelperTokenizer
     tok = DesktopHelperTokenizer.load()
-    assert tok.vocab_size == 49163, f"expected 49152+11, got {tok.vocab_size}"
+    assert tok.vocab_size == 49164, f"expected 49152+12, got {tok.vocab_size}"
     assert tok.tool_token_id("calendar") >= 49152
 
 

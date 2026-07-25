@@ -673,8 +673,104 @@ def _chat() -> tuple[str, str]:
     return random.choice(prompts), random.choice(replies)
 
 
+# -- file finder --------------------------------------------------------------
+# Deliberately wide phrasing coverage — the whole reason for this tool token is
+# that keyword routing missed natural queries ("find the most recent version of
+# kai's resume", "where is X located"). Third-person ("kai's"), "the/most
+# recent/latest", "where is … located", and bare "find X" are all here.
+_FILE_TOPICS = [
+    "resume", "CV", "cover letter", "budget", "invoice", "receipt", "report",
+    "quarterly report", "presentation", "slides", "essay", "thesis", "contract",
+    "lease", "tax return", "tax documents", "spreadsheet", "meeting notes",
+    "project proposal", "grocery list", "reading list", "screenshot", "photo",
+    "vacation photos", "boarding pass", "W2", "pay stub", "insurance form",
+    "signed contract", "project plan", "budget spreadsheet",
+]
+
+_FILE_TEMPLATES = [
+    "Find my {t}", "Find the {t}", "Find {who} {t}",
+    "Find the most recent version of {who2} {t}",
+    "Find the latest {t}", "Find the newest {t}",
+    "Where is my {t}", "Where's my {t}", "Where is the {t} located",
+    "Where did I save my {t}", "Where do I have my {t}",
+    "Locate my {t}", "Locate the {t}", "Locate {who} {t}",
+    "Search for my {t}", "Search for the {t}",
+    "Look for my {t}", "Look for the {t}",
+    "Pull up my {t}", "Can you find my {t}", "Can you find the {t}",
+    "Find the file called {t}", "Do I have a {t} file",
+    "I need to find my {t}", "Get me my {t}", "Get me the {t}",
+    "Track down my {t}", "Dig up my {t}",
+]
+
+_FILE_EXTS = [".pdf", ".docx", ".pages", ".txt", ".md", ".xlsx", ".pptx", ".key"]
+_FILE_DIRS = ["~/Documents", "~/Downloads", "~/Desktop", "~/Documents/Work",
+              "~/Documents/Personal"]
+
+
+def _filename(topic: str) -> str:
+    base = topic.lower().replace("the ", "").replace("last year's ", "") \
+                .replace("'s", "").replace("my ", "").strip().replace(" ", "_")
+    stem = random.choice([base, base.capitalize(), f"{_name()}_{base}",
+                          f"{base}_v2", f"{base}_final", f"{base}_2024",
+                          f"{base}_draft"])
+    return stem + random.choice(_FILE_EXTS)
+
+
+_RECENT_FILE_PROMPTS = [
+    "What files did I work on last week?", "What did I work on last week?",
+    "What did I work on a couple weeks ago?", "Show me my recent files",
+    "Show me the files I worked on recently", "What have I been working on lately?",
+    "Files I edited yesterday", "What documents did I edit this week?",
+    "Recent documents", "What files have I changed recently?",
+    "Pull up my recent documents", "What did I work on a few days ago?",
+    "Files from the last week", "What was I working on yesterday?",
+    "What did I edit in the last couple days?", "Show me recently modified files",
+]
+_RECENT_WINDOWS = ["last day", "last couple days", "last week", "last two weeks",
+                   "last month", "last 3 days"]
+
+
+def _recent_files_result() -> str:
+    window = random.choice(_RECENT_WINDOWS)
+    n = random.randint(1, 4)
+    listing = ", ".join(f"{_filename(random.choice(_FILE_TOPICS))} "
+                        f"({random.choice(_FILE_DIRS)})" for _ in range(n))
+    return f"{n} file{'s' if n > 1 else ''} from the {window}: {listing}"
+
+
+def _files() -> tuple[str, str]:
+    # time-based ("what did I work on last week?") vs name-based file queries
+    if random.random() < 0.25:
+        prompt = random.choice(_RECENT_FILE_PROMPTS)
+        result = _recent_files_result()
+        return _wrap("files", result, result, prompt)
+    if random.random() < 0.15:
+        # explicit filename with an extension
+        name = _filename(random.choice(_FILE_TOPICS))
+        prompt = random.choice([f"Find {name}", f"Where is {name}",
+                                f"Locate {name}", f"Pull up {name}"])
+        topic_for_result = name
+    else:
+        template = random.choice(_FILE_TEMPLATES)
+        topic = random.choice(_FILE_TOPICS)
+        prompt = template.format(t=topic, who=f"{_name()}'s",
+                                 who2=random.choice(["my", f"{_name()}'s"]))
+        topic_for_result = topic
+
+    if random.random() < 0.12:
+        term = topic_for_result.split()[-1].split(".")[0]
+        return _wrap("files", f"No files found matching '{term}'",
+                     f"I couldn't find any files matching '{term}'.", prompt)
+
+    n = random.randint(1, 4)
+    listing = ", ".join(f"{_filename(topic_for_result)} ({random.choice(_FILE_DIRS)})"
+                        for _ in range(n))
+    result = f"Found {n} file{'s' if n > 1 else ''}: {listing}"
+    return _wrap("files", result, result, prompt)  # files is verbatim → reply = result
+
+
 _BUILDERS = [_calendar, _screen, _reminders, _notes, _spotify,
-             _launcher, _weather, _news, _stocks, _chat]
+             _launcher, _weather, _news, _stocks, _files, _chat]
 
 
 def generate(count: int, seed: int | None = None) -> list[dict]:

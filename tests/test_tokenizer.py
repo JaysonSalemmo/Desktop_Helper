@@ -10,8 +10,13 @@ def tok() -> DesktopHelperTokenizer:
 
 
 def test_vocab_layout(tok: DesktopHelperTokenizer):
-    # 49152 SmolLM2 tokens + 11 appended tool/protocol tokens
-    assert tok.vocab_size == 49163
+    # 49152 SmolLM2 tokens + 12 appended tool/protocol tokens
+    # (10 tools + [RESULT]/[/RESULT]); the files token was added last so it
+    # doesn't shift the earlier ids the fine-tuned checkpoint learned
+    assert tok.vocab_size == 49164
+    assert tok.tool_token_id("files") == 49163      # appended at the very end
+    assert tok.result_start_id == 49161             # [RESULT] id unchanged
+    assert tok.result_end_id == 49162               # [/RESULT] id unchanged
     assert tok.bos_id == 1   # <|im_start|>
     assert tok.eos_id == 2   # <|im_end|>
     # SmolLM2 quirk: pad IS eos — anything masking padding must go by

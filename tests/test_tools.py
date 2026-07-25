@@ -337,6 +337,41 @@ def test_extract_file_query():
     assert extract_file_query("find my files") is None  # bare noun, no term
 
 
+def test_extract_file_term():
+    from src.assistant.tools import extract_file_term
+
+    # the phrasings that failed live — third-person, "most recent version of"
+    assert extract_file_term("Find Kai's resume") == "resume"
+    assert extract_file_term("Find the most recent version of kai's resume") == "resume"
+    assert extract_file_term("Find my resume") == "resume"
+    assert extract_file_term("locate report.pdf") == "report.pdf"
+    assert extract_file_term("find the report") == "report"
+    assert extract_file_term("pull up the budget spreadsheet") == "budget"
+    assert extract_file_term("where is my invoice located") == "invoice"
+
+
+def test_time_based_file_queries():
+    from src.assistant.tools import (build_fallback_router, extract_recent_days,
+                                     is_recent_files_query)
+
+    # recency window parsing
+    assert extract_recent_days("files I worked on last week") == 7
+    assert extract_recent_days("what did I work on a couple weeks ago") == 14
+    assert extract_recent_days("files from 3 days ago") == 3
+    assert extract_recent_days("2 weeks ago") == 14
+    assert extract_recent_days("recent documents") == 7
+    assert extract_recent_days("find my resume") is None
+    # routing needs a file/work signal so calendar time queries aren't stolen
+    assert is_recent_files_query("files I worked on last week") is True
+    assert is_recent_files_query("what's on my calendar this week") is False
+
+    fb = build_fallback_router()
+    # "what did I work on…" contains "what did i" but must beat the memory rule
+    assert fb("what did I work on a couple weeks ago") == "files"
+    assert fb("what did I ask you earlier") == "memory"
+    assert fb("what's on my calendar this week") is None
+
+
 def test_pre_router_forces_unambiguous_file_queries():
     from src.assistant.tools import build_pre_router
 
@@ -345,12 +380,25 @@ def test_pre_router_forces_unambiguous_file_queries():
     assert pre("where is my resume file") == "files"
     assert pre("find my budget document") == "files"
     assert pre("locate invoice.pdf") == "files"
-    # softer phrasing (no noun/extension) → let the model try; fallback nets it
+    # a document KIND ("spreadsheet"/"photos") is as unambiguous as a bare noun:
+    # the files token mis-routes "where's my budget spreadsheet" to reminders,
+    # so the pre-router forces it (needs the possessive intent to reach here)
+    assert pre("where's my budget spreadsheet") == "files"
+    assert pre("find my vacation photos") == "files"
+    # softer phrasing (no noun/kind/extension) → let the model try; fallback nets it
     assert pre("find my resume") is None
     assert pre("where is my budget") is None
     # not a file query at all → None
     assert pre("what's the weather in Tokyo") is None
-    assert pre("remind me to call mom") is None
+    # reminder create / list-add is forced to reminders (symmetric with files):
+    # the files token over-fires on "…to my shopping list", and because the model
+    # emits a call the fallback never gets to correct it
+    assert pre("remind me to call mom") == "reminders"
+    assert pre("add milk to my shopping list") == "reminders"
+    # but a FILE query that merely contains "list" is NOT stolen to reminders —
+    # the guard needs "to/on my X list", which this lacks, so it defers (None)
+    # and the model/fallback route it (to files) instead
+    assert pre("find my grocery list") is None
 
 
 def test_fallback_router_routes_file_search():

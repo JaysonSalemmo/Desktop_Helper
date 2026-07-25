@@ -92,3 +92,46 @@ def find(query: str, max_results: int = 5) -> str:
     listed = ", ".join(f"{p.name} ({_human(p.parent)})" for p in results)
     noun = "file" if len(results) == 1 else "files"
     return f"Found {len(results)} {noun}: {listed}"
+
+
+def _mdfind_modified_since(days: int) -> list[Path]:
+    """Paths whose content was modified within the last `days` days (Spotlight
+    date query — the raw expression form, not -name)."""
+    seconds = int(days * 86400)
+    try:
+        out = subprocess.run(
+            ["mdfind", "-onlyin", str(HOME),
+             f"kMDItemContentModificationDate >= $time.now(-{seconds})"],
+            capture_output=True, text=True, timeout=_MDFIND_TIMEOUT,
+        )
+    except Exception:
+        return []
+    if out.returncode != 0:
+        return []
+    return [Path(line) for line in out.stdout.splitlines() if line]
+
+
+def _window_label(days: int) -> str:
+    return {1: "last day", 2: "last couple days", 7: "last week",
+            14: "last two weeks", 30: "last month"}.get(days, f"last {days} days")
+
+
+def search_recent(days: int, max_results: int = 5) -> list[Path]:
+    """Actual files (not folders) modified in the last `days` days, noise
+    removed, newest first, capped."""
+    matches = [p for p in _mdfind_modified_since(days)
+               if not _is_noise(p) and p.is_file()]
+    matches.sort(key=_mtime, reverse=True)
+    return matches[:max_results]
+
+
+def recent(days: int, max_results: int = 5) -> str:
+    """One display sentence: the files you worked on within the last `days`
+    days. Time-based counterpart to find() (which searches by name)."""
+    results = search_recent(days, max_results)
+    window = _window_label(days)
+    if not results:
+        return f"No files worked on in the {window}"
+    listed = ", ".join(f"{p.name} ({_human(p.parent)})" for p in results)
+    noun = "file" if len(results) == 1 else "files"
+    return f"{len(results)} {noun} from the {window}: {listed}"

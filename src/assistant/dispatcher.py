@@ -262,6 +262,19 @@ class ToolDispatcher:
                 if routed is not None:
                     return self._finish_via_router(routed, message)
 
+            if (step == 0 and tool == "files" and tool_used is None
+                    and self.fallback_router is not None):
+                # the files row was warm-started alone and over-fires on other
+                # tools' phrasings ("Play a song…" → files, "when are my
+                # reminders…" → files). Treat a files route as PROVISIONAL: if
+                # the deterministic fallback names a concrete OTHER tool, that
+                # explicit cue wins. Real file queries ("Find Kai's resume")
+                # yield no fallback tool, so files stands. (Stopgap — the real
+                # fix is retraining routing with hard negatives, STATUS item 6.)
+                veto = self.fallback_router(message)
+                if veto is not None and veto not in ("files", "chat"):
+                    return self._finish_via_router(veto, message)
+
             if tool is not None and tool_used is None:
                 # intercept: keep the [CALL: tool] token, then inject the *real* result
                 # instead of letting the model generate its fabricated one

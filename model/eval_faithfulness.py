@@ -57,6 +57,12 @@ CASES = [
      "Blender in front, also open: Anki, Transmit", ["Blender", "Anki", "Transmit"]),
     ("launcher", "Open Blender.",
      "Blender launched", ["Blender"]),
+    ("files", "Find Kai's resume.",
+     "resume_2025.pdf — ~/Documents (modified Jul 12)",
+     ["resume_2025.pdf", "Documents"]),
+    ("files", "Where's my budget spreadsheet?",
+     "budget_q3.xlsx — ~/Documents/Finances",
+     ["budget_q3.xlsx", "Finances"]),
     ("calendar", "What do I have scheduled?",
      "Calendar access not granted", ["access", "granted"]),
 ]

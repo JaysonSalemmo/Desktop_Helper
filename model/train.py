@@ -105,11 +105,17 @@ def train(args) -> None:
     model.gradient_checkpointing = True
 
     if args.embeddings_only:
-        first_new_row = tokenizer.vocab_size - 11
+        # default: the first special-token id (calendar, 49152) — trains every
+        # from-scratch tool row. Overridable so a post-resize run can warm-start
+        # ONLY the newly-appended row(s) and leave the already-trained rows frozen.
+        first_new_row = args.first_new_row
+        if first_new_row is None:
+            first_new_row = tokenizer.tool_token_id("calendar")
+        n_rows = tokenizer.vocab_size - first_new_row
         configure_embeddings_only(model, first_new_row)
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"WARM-START MODE: training embedding rows {first_new_row}+ only "
-              f"({trainable / 1e6:.0f}M-param tensor, 11 rows unmasked)")
+              f"({trainable / 1e6:.0f}M-param tensor, {n_rows} rows unmasked)")
 
     print("Building dataset...")
     dataset = InstructDataset(
@@ -245,8 +251,14 @@ def main() -> None:
     parser.add_argument("--warmup-steps", type=int, default=100)
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--embeddings-only", action="store_true",
-                        help="warm-start mode: train ONLY the 11 appended "
+                        help="warm-start mode: train ONLY the appended "
                              "tool-token embedding rows (use --lr 1e-3)")
+    parser.add_argument("--first-new-row", type=int, default=None,
+                        help="embeddings-only: first embedding row to train "
+                             "(rows below it are gradient-masked). Default: the "
+                             "first special-token id, i.e. every tool row. Pass "
+                             "the files-token id to warm-start only that row "
+                             "after a resize.")
     parser.add_argument("--no-dolly", action="store_true",
                         help="tool-call data only (for the warm start — "
                              "concentrated routing signal, forgetting impossible)")

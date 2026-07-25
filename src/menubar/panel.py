@@ -163,11 +163,30 @@ class _ChatInput(NSTextView):
                  NSForegroundColorAttributeName: NSColor.placeholderTextColor()})
 
 
+class _CloseWatcher(NSObject):
+    """Window delegate that fires a callback when the panel is closed (its X
+    button), so the app can re-enable the 'Show Chat' menu item."""
+
+    def initWithCallback_(self, callback):
+        self = objc.super(_CloseWatcher, self).init()
+        if self is None:
+            return None
+        self._callback = callback
+        return self
+
+    def windowWillClose_(self, notification):
+        self._callback()
+
+
 class ReplyPanel:
-    def __init__(self, on_followup, actions: dict | None = None):
+    def __init__(self, on_followup, actions: dict | None = None,
+                 on_visibility=None):
         """on_followup(text) is called on the main thread when submitted.
-        actions: {"Speak": fn, "Briefing": fn, ...} → header-bar buttons."""
+        actions: {"Speak": fn, "Briefing": fn, ...} → header-bar buttons.
+        on_visibility(bool) fires when the window is shown (True) or closed
+        (False) — lets the app grey out its 'Show Chat' item accordingly."""
         self._on_followup = on_followup
+        self._on_visibility = on_visibility
 
         # no UtilityWindow mask: utility panels get miniature, oddly-placed
         # traffic lights — standard chrome gives full-size, centered ones
@@ -186,6 +205,11 @@ class ReplyPanel:
         # if needed"), so clicking a reply to select it takes keyboard focus and
         # ⌘A / ⌘C reach the text — without this, copy silently fails
         self.panel.setBecomesKeyOnlyIfNeeded_(False)
+        # notified when the user closes the window (X) so the app re-enables its
+        # reopen item; kept as an attribute or ObjC would deallocate the delegate
+        self._close_watcher = _CloseWatcher.alloc().initWithCallback_(
+            lambda: self._notify_visible(False))
+        self.panel.setDelegate_(self._close_watcher)
         self.panel.center()
 
         content = self.panel.contentView()
@@ -395,6 +419,18 @@ class ReplyPanel:
 
     # -- api (main thread only) ----------------------------------------------
 
+    def _notify_visible(self, visible: bool) -> None:
+        if self._on_visibility is not None:
+            self._on_visibility(visible)
+
+    def _present_window(self) -> None:
+        self.panel.orderFrontRegardless()
+        self._notify_visible(True)
+
+    def present(self) -> None:
+        """Reopen the window (menu 'Show Chat') with its conversation intact."""
+        self._present_window()
+
     def show(self, question: str, reply: str) -> None:
         if not self._resolve_pending(question):
             self._add_bubble(question, user=True)
@@ -402,7 +438,7 @@ class ReplyPanel:
         self.input.setString_("")
         self.input.setNeedsDisplay_(True)  # repaint the placeholder
         self._resize_input()               # shrink back to one line
-        self.panel.orderFrontRegardless()
+        self._present_window()
 
     def show_sections(self, question: str, sections: list[str]) -> None:
         """One user bubble, then each section as its own assistant bubble
@@ -411,7 +447,7 @@ class ReplyPanel:
             self._add_bubble(question, user=True)
         for section in sections:
             self._add_bubble(section, user=False)
-        self.panel.orderFrontRegardless()
+        self._present_window()
 
     def show_thinking(self, question: str) -> None:
         if self._pending is not None:
@@ -419,7 +455,7 @@ class ReplyPanel:
         self._add_bubble(question, user=True)
         self._pending = self._add_bubble("…", user=False)
         self._pending_question = question
-        self.panel.orderFrontRegardless()
+        self._present_window()
 
     def _resolve_pending(self, question: str) -> bool:
         """Remove the '…' bubble if this reply answers it. True → the user
@@ -454,7 +490,8 @@ class ReplyPanel:
         self._relayout()
 
     def close(self) -> None:
-        self.panel.orderOut_(None)
+        self.panel.orderOut_(None)  # orderOut doesn't fire windowWillClose
+        self._notify_visible(False)
 
     # -- internal ------------------------------------------------------------
 

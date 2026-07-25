@@ -96,8 +96,27 @@ def parse_due(text: str):
     return None, None
 
 
+def _format_due(components) -> str | None:
+    """Readable due string from a reminder's NSDateComponents, or None if it has
+    no due date. Date-only reminders (no time set) omit the time so we don't
+    surface a bogus '12:00 AM'."""
+    if components is None:
+        return None
+    from Foundation import NSCalendar, NSDateFormatter
+    date = NSCalendar.currentCalendar().dateFromComponents_(components)
+    if date is None:
+        return None
+    # an unset hour comes back as NSDateComponentUndefined (a huge int), so a
+    # plain 0..23 range check distinguishes a timed reminder from a date-only one
+    has_time = 0 <= components.hour() <= 23
+    fmt = NSDateFormatter.alloc().init()
+    fmt.setDateFormat_("EEE MMM d 'at' h:mm a" if has_time else "EEE MMM d")
+    return str(fmt.stringFromDate_(date))
+
+
 def get_incomplete(list_name: str | None = None) -> list[str]:
-    """Incomplete reminder titles — all lists, or just one if `list_name` given."""
+    """Incomplete reminders — "title" or "title (due …)" — all lists, or just
+    one if `list_name` given."""
     store = request_access(EKEntityTypeReminder)
     cal = _find_calendar(store, list_name)
     calendars = [cal] if cal is not None else None
@@ -109,7 +128,12 @@ def get_incomplete(list_name: str | None = None) -> list[str]:
     found: list[str] = []
 
     def callback(reminders):
-        found.extend(str(r.title()) for r in (reminders or []) if r.title())
+        for r in (reminders or []):
+            title = r.title()
+            if not title:
+                continue
+            due = _format_due(r.dueDateComponents())
+            found.append(f"{title} (due {due})" if due else str(title))
         done.set()
 
     store.fetchRemindersMatchingPredicate_completion_(predicate, callback)
