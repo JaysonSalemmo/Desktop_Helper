@@ -380,12 +380,25 @@ def test_pre_router_forces_unambiguous_file_queries():
     assert pre("where is my resume file") == "files"
     assert pre("find my budget document") == "files"
     assert pre("locate invoice.pdf") == "files"
-    # softer phrasing (no noun/extension) → let the model try; fallback nets it
+    # a document KIND ("spreadsheet"/"photos") is as unambiguous as a bare noun:
+    # the files token mis-routes "where's my budget spreadsheet" to reminders,
+    # so the pre-router forces it (needs the possessive intent to reach here)
+    assert pre("where's my budget spreadsheet") == "files"
+    assert pre("find my vacation photos") == "files"
+    # softer phrasing (no noun/kind/extension) → let the model try; fallback nets it
     assert pre("find my resume") is None
     assert pre("where is my budget") is None
     # not a file query at all → None
     assert pre("what's the weather in Tokyo") is None
-    assert pre("remind me to call mom") is None
+    # reminder create / list-add is forced to reminders (symmetric with files):
+    # the files token over-fires on "…to my shopping list", and because the model
+    # emits a call the fallback never gets to correct it
+    assert pre("remind me to call mom") == "reminders"
+    assert pre("add milk to my shopping list") == "reminders"
+    # but a FILE query that merely contains "list" is NOT stolen to reminders —
+    # the guard needs "to/on my X list", which this lacks, so it defers (None)
+    # and the model/fallback route it (to files) instead
+    assert pre("find my grocery list") is None
 
 
 def test_fallback_router_routes_file_search():

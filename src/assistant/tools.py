@@ -63,6 +63,14 @@ def extract_play_query(message: str) -> str | None:
 # "where is" are too broad ("where is the coffee shop" is not a file search)
 # and would steal generic questions from the model.
 _FILE_NOUN_RE = re.compile(r"\b(?:files?|folders?|documents?)\b", re.I)
+# document KINDS ("budget spreadsheet", "vacation photos") — as unambiguous a
+# file signal as a bare "document", but not in _FILE_NOUN_RE because they're
+# also the type-tail that gets stripped from the search term. The pre-router
+# treats them as a force signal so "where's my budget spreadsheet" doesn't fall
+# through to the model (which confidently mis-routes it to reminders).
+_FILE_KIND_RE = re.compile(
+    r"\b(?:spreadsheets?|presentations?|slideshows?|photos?|pictures?|"
+    r"screenshots?|pdfs?)\b", re.I)
 _FILE_INTENT_RE = re.compile(
     r"\b(?:find my|locate|where(?:'s| is| are) my)\b", re.I)
 # a token like "invoice.pdf" is an unambiguous file reference on its own —
@@ -522,9 +530,19 @@ def build_pre_router(config: dict | None = None) -> "Callable[[str], str | None]
 
     Returns the tool name to force, or None to let the model route normally."""
     def pre_route(message: str) -> str | None:
+        # reminder create / list-add FIRST: the files token over-fires on
+        # "add milk to my shopping list" (the word "list" pulls it to files),
+        # and because the model emits a call the fallback never gets to correct
+        # it. These phrasings are high-precision (an add-prefix or "…to my X
+        # list"), so forcing reminders here is safe and symmetric with files.
+        if extract_reminder(message) is not None \
+                or extract_reminder_list(message) is not None:
+            return "reminders"
         if extract_file_query(message) is None:
             return None  # not a file request (no clean term to search)
-        if _FILE_NOUN_RE.search(message.lower()) or _FILE_EXT_RE.search(message):
+        lower = message.lower()
+        if (_FILE_NOUN_RE.search(lower) or _FILE_KIND_RE.search(lower)
+                or _FILE_EXT_RE.search(message)):
             return "files"
         return None
     return pre_route

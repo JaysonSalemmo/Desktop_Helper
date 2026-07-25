@@ -71,10 +71,14 @@ class DesktopHelperMenuBar(rumps.App):
         # reopens the chat window; greyed while it's already showing (a callback
         # of None renders disabled — see _panel_visibility)
         self.show_chat_item = rumps.MenuItem("Show Chat", callback=self._show_chat_clicked)
-        menu = [self.ask_item, self.show_chat_item]
+        # keep the two keybound actions together at the top — Ask, then Speak —
+        # with Show Chat right below them (Kai's layout).
+        menu = [self.ask_item]
         if self.voice_enabled:
             self.speak_item = rumps.MenuItem("Speak", callback=self._toggle_voice)
             menu.append(self.speak_item)
+        menu.append(self.show_chat_item)
+        if self.voice_enabled:
             self.voice_replies_item = rumps.MenuItem("Voice Replies",
                                                      callback=self._toggle_voice_replies)
             self.voice_replies_item.state = 1 if self.voice_replies else 0
@@ -122,6 +126,11 @@ class DesktopHelperMenuBar(rumps.App):
             try:
                 base = item.title.split("  ")[0]  # idempotent if re-applied
                 item.title = f"{base}  {combo_symbols(combo)}"
+                if name == "speak":
+                    # the Speak title is rewritten during recording ("Stop
+                    # listening" → "Speak"); remember the labelled idle title so
+                    # those resets restore the keybind instead of dropping it
+                    self._speak_idle_title = item.title
             except Exception:
                 pass  # cosmetic — rumps internals may shift
 
@@ -156,8 +165,9 @@ class DesktopHelperMenuBar(rumps.App):
         log.info("model ready on %s", device.type)
         self.dispatcher = dispatcher
         hotkey_live = self._hotkeys is not None and self._hotkeys.ok
+        from src.menubar.hotkey import combo_symbols
         speak_combo = (self.config.get("keybinds") or {}).get("speak") or self.hotkey_combo
-        hotkey_hint = f"  ({speak_combo})" if hotkey_live else ""
+        hotkey_hint = f"  ({combo_symbols(speak_combo)})" if hotkey_live else ""
         self._ready_status = f"Ready on {device.type}{hotkey_hint}"
         self._on_main(self._set_status, TITLE_READY, self._ready_status)
         if self.transcriber is not None:
@@ -398,7 +408,7 @@ class DesktopHelperMenuBar(rumps.App):
         self.title = TITLE_THINKING
         self.status_item.title = "Transcribing…"
         if self.voice_enabled:
-            self.speak_item.title = "Speak"
+            self.speak_item.title = getattr(self, "_speak_idle_title", "Speak")
         self._get_panel().set_action_state("Speak", False)
         threading.Thread(target=self._transcribe_and_respond, args=(audio,),
                          daemon=True).start()
@@ -427,12 +437,8 @@ class DesktopHelperMenuBar(rumps.App):
         try:
             result = self.dispatcher.respond(message)
             body = result.response
-            # ground-truth line only where the model wrote the reply and could
-            # have garbled it — verbatim tools' replies ARE the ground truth
-            if result.tool is not None and result.tool not in self.dispatcher.verbatim:
-                body += f"\n\n[{result.tool}] {result.tool_result}"
             if spoken and self.voice_replies:
-                # you talked to it — it talks back (reply only, not the tool line)
+                # you talked to it — it talks back
                 from src.voice.voice import speak
                 speak(result.response)
         except Exception as exc:
