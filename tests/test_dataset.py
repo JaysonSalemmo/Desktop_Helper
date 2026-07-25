@@ -47,7 +47,7 @@ def test_generator_examples_parse_and_roundtrip():
         assert tok.tool_token_id(tool) in ids
         assert ids.count(tok.result_start_id) == 1
         assert ids.count(tok.result_end_id) == 1
-    assert len(tools_seen) == 9
+    assert len(tools_seen) == 10
     assert chat_seen > 0  # the routing-contrast category must be present
 
 

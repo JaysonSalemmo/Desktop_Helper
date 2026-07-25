@@ -16,7 +16,8 @@
     "[CALL: news]",
     "[CALL: stocks]",
     "[RESULT]",
-    "[/RESULT]"
+    "[/RESULT]",
+    "[CALL: files]"
   ],
   "is_local": false,
   "local_files_only": false,

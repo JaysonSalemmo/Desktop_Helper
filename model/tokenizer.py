@@ -34,9 +34,20 @@ TOOL_TOKENS: dict[str, str] = {
     "weather":   "[CALL: weather]",
     "news":      "[CALL: news]",
     "stocks":    "[CALL: stocks]",
+    "files":     "[CALL: files]",
 }
 
-SPECIAL_TOKENS: list[str] = [*TOOL_TOKENS.values(), "[RESULT]", "[/RESULT]"]
+# Order is load-bearing: the fine-tuned checkpoint learned these exact token
+# ids, so the original tokens MUST keep their positions. New tools are appended
+# AFTER the result markers so they don't shift the old ids — the checkpoint
+# resize is then a clean one-row append at the end.
+_LEGACY_TOOLS = ["calendar", "screen", "reminders", "notes", "spotify",
+                 "launcher", "weather", "news", "stocks"]
+SPECIAL_TOKENS: list[str] = (
+    [TOOL_TOKENS[t] for t in _LEGACY_TOOLS]
+    + ["[RESULT]", "[/RESULT]"]
+    + [TOOL_TOKENS[t] for t in TOOL_TOKENS if t not in _LEGACY_TOOLS]
+)
 
 
 class DesktopHelperTokenizer:

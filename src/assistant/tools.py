@@ -115,6 +115,88 @@ def extract_file_query(message: str) -> str | None:
     return query or None
 
 
+# term extraction for a message the MODEL already routed to files (no gate — it's
+# already been classified as a file query, so pull the best search term). Handles
+# the phrasings extract_file_query's strict routing gate deliberately rejects:
+# "Find Kai's resume", "the most recent version of …".
+_TERM_VERB_RE = re.compile(
+    r"^(?:can you |could you |please )?"
+    r"(?:find|locate|look\s+for|search\s+for|show\s+me|pull\s+up|get\s+me|"
+    r"dig\s+up|track\s+down|where(?:'s| is| are)|i\s+(?:need|want)(?:\s+to\s+find)?)"
+    r"\s+", re.I)
+_TERM_QUALIFIERS_RE = re.compile(
+    r"^(?:"
+    r"(?:the|my|a|an|any|all)\s+"
+    r"|most\s+recent\s+|latest\s+|newest\s+|recent\s+|current\s+|old\s+"
+    r"|final\s+|signed\s+"
+    r"|version\s+of\s+|copy\s+of\s+"
+    r"|[\w][\w.'-]*'s\s+"          # third-person possessive ("Kai's")
+    r")+", re.I)
+_TERM_TRAILING_RE = re.compile(
+    r"\s+(?:located|saved|stored|somewhere|please|file|document)\s*$", re.I)
+
+
+def extract_file_term(message: str) -> str | None:
+    """Best filename search term from a file query, no routing gate.
+
+    "Find Kai's resume"                      → "resume"
+    "Find the most recent version of my CV"  → "CV"
+    "locate the budget spreadsheet"          → "budget"
+    """
+    text = message.strip().rstrip(".!?")
+    text = _TERM_VERB_RE.sub("", text).strip()
+    text = _TERM_TRAILING_RE.sub("", text).strip()
+    text = _TERM_QUALIFIERS_RE.sub("", text).strip()
+    text = _FILE_NOUN_PREFIX_RE.sub("", text).strip()
+    text = _FILE_TYPE_TAIL_RE.sub("", text).strip()
+    if text.lower() in _FILE_BARE_NOUNS:
+        return None
+    return text or None
+
+
+# time-based file search ("files I worked on last week", "recent documents") —
+# a recency window in days, or None. Distinct from name search (extract_file_query)
+_RECENT_N_DAYS_RE = re.compile(r"\b(\d+)\s+days?\s+(?:ago|back)\b", re.I)
+_RECENT_N_WEEKS_RE = re.compile(r"\b(\d+)\s+weeks?\s+(?:ago|back)\b", re.I)
+_RECENCY_MAP = [
+    (r"\btoday\b", 1),
+    (r"\byesterday\b", 2),
+    (r"\b(?:this|last|past|the\s+last|the\s+past)\s+week\b", 7),
+    (r"\b(?:a|one)\s+week\s+(?:ago|back)\b", 7),
+    (r"\bcouple\s+(?:of\s+)?weeks?\b", 14),
+    (r"\btwo\s+weeks?\b", 14),
+    (r"\b(?:this|last|past)\s+month\b", 30),
+    (r"\b(?:a|one)\s+month\s+(?:ago|back)\b", 30),
+    (r"\b(?:recently|lately|these\s+days)\b", 7),
+    (r"\brecent\s+(?:files?|docs?|documents?|work|stuff)\b", 7),
+]
+# a file/work signal, so "what's on my calendar this week" doesn't become a
+# file search — the recency phrase alone isn't enough to route to files
+_FILE_WORK_WORDS = ("file", "document", " doc", "work on", "working on",
+                    "worked on", "been working", "edited", "opened", "saved")
+
+
+def extract_recent_days(message: str) -> int | None:
+    """The recency window in days for a time-based file query, or None."""
+    lower = message.lower()
+    if (m := _RECENT_N_DAYS_RE.search(lower)):
+        return int(m.group(1))
+    if (m := _RECENT_N_WEEKS_RE.search(lower)):
+        return int(m.group(1)) * 7
+    for pattern, days in _RECENCY_MAP:
+        if re.search(pattern, lower):
+            return days
+    return None
+
+
+def is_recent_files_query(message: str) -> bool:
+    """A time-based FILE query (recency phrase + a file/work signal) — used for
+    routing, so calendar/reminder time queries aren't stolen."""
+    lower = message.lower()
+    return extract_recent_days(message) is not None \
+        and any(w in lower for w in _FILE_WORK_WORDS)
+
+
 def spotify_handler(message: str, credentials: dict | None = None) -> str:
     m = message.lower()
     # status questions first — "what's playing?" contains "play" and must not
@@ -311,10 +393,18 @@ def build_handlers(config: dict, memory=None) -> dict[str, Handler]:
         return capture.describe()
 
     def files_handler(message: str) -> str:
-        query = extract_file_query(message)
+        max_results = config.get("files", {}).get("max_results", 5)
+        # a recency phrase ("last week", "recent files") → time search; the
+        # window wins over any name, so "files I worked on last week" isn't a
+        # literal name search for "worked on last week"
+        days = extract_recent_days(message)
+        if days is not None:
+            return files.recent(days, max_results)
+        # extract_file_term (not extract_file_query) — routing already happened
+        # (model token or fallback), so pull the term without the strict gate
+        query = extract_file_term(message)
         if not query:
             return "Tell me part of the file name to search for"
-        max_results = config.get("files", {}).get("max_results", 5)
         return files.find(query, max_results)
 
     def memory_handler(message: str) -> str:
@@ -453,8 +543,12 @@ def build_fallback_router(config: dict | None = None) -> Handler:
 
     def fallback(message: str) -> str | None:
         lower = message.lower()
-        # memory questions FIRST — "what did you play earlier?" contains
-        # "play …" and would otherwise become a spotify search for "earlier"
+        # time-based FILE query FIRST — "what did I work on last week" contains
+        # "what did i" and would otherwise be stolen by the memory rule below
+        if is_recent_files_query(message):
+            return "files"
+        # memory questions — "what did you play earlier?" contains "play …" and
+        # would otherwise become a spotify search for "earlier"
         if any(k in lower for k in ("earlier", "last time", "what did i",
                                     "what did you", "remember", "we talk")):
             return "memory"
@@ -475,7 +569,8 @@ def build_fallback_router(config: dict | None = None) -> Handler:
         # "Find my resume" / "where is my budget file" — no model token for
         # file search (like memory), so the keyword router is its only path.
         # Checked after the other tools so their phrasings win first.
-        if extract_file_query(message) is not None:
+        if extract_file_query(message) is not None \
+                or is_recent_files_query(message):
             return "files"
         # "Remind me to go for a run in an hour" — reminder CREATE phrasing was
         # never trained (the model saw only a couple of READ prompts), so it

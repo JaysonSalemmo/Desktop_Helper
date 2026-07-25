@@ -64,3 +64,28 @@ def test_find_singular_and_none(monkeypatch):
 def test_mdfind_bad_query_returns_empty():
     # real subprocess path: garbage that yields no results must not raise
     assert files._mdfind("\x00zzz-no-such-file-anywhere-zzz") == []
+
+
+def test_recent_filters_folders_and_noise(tmp_path, monkeypatch):
+    monkeypatch.setattr(files, "HOME", tmp_path)
+    doc = tmp_path / "report.pdf"
+    doc.write_text("x")
+    folder = tmp_path / "somedir"
+    folder.mkdir()
+    lib = tmp_path / "Library" / "Caches"
+    lib.mkdir(parents=True)
+    libfile = lib / "cache.pdf"
+    libfile.write_text("x")
+    monkeypatch.setattr(files, "_mdfind_modified_since",
+                        lambda days: [doc, folder, libfile])
+    out = files.recent(7)
+    assert "report.pdf" in out
+    assert "somedir" not in out    # folders excluded (not a file)
+    assert "cache.pdf" not in out  # Library noise excluded
+
+
+def test_recent_none_and_window_labels(monkeypatch):
+    monkeypatch.setattr(files, "_mdfind_modified_since", lambda days: [])
+    assert files.recent(7) == "No files worked on in the last week"
+    assert files.recent(14) == "No files worked on in the last two weeks"
+    assert files.recent(5) == "No files worked on in the last 5 days"
