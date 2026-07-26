@@ -321,6 +321,55 @@ def extract_reminder(message: str) -> tuple[str, str | None] | None:
     return None
 
 
+# delete / reschedule intent — new write ops (Kai 2026-07-26: overdue clutter
+# needs cleaning up from chat, and stale reminders need moving to a new day)
+_REMINDER_WORD_RE = re.compile(r"\breminders?\b", re.I)
+_REMINDER_DELETE_RE = re.compile(r"\b(?:delete|remove|clear)\b", re.I)
+_REMINDER_OVERDUE_RE = re.compile(
+    r"\b(?:overdue|past due|passed|expired|old)\b", re.I)
+_REMINDER_RESCHED_RE = re.compile(
+    r"\b(?:reschedule|move|push|change)\b", re.I)
+_DUE_TODAY_READ_RE = re.compile(r"\btoday\b", re.I)  # "due today", "for today"
+# words that are part of the request, never part of a reminder's title
+_REMINDER_STOPWORDS = {
+    "delete", "remove", "clear", "reschedule", "move", "push", "change",
+    "the", "my", "a", "an", "all", "any", "please", "can", "you",
+    "reminder", "reminders", "one", "ones", "that", "which", "where",
+    "have", "has", "had", "already", "passed", "overdue", "past", "expired",
+    "old", "due", "date", "day", "preexisting", "pre-existing", "existing",
+    "to", "of", "for", "up",
+}
+
+
+def _reminder_title_words(message: str, date_text: str | None = None) -> str | None:
+    """Whatever's left of the message once request words and the date phrase
+    are stripped — the title fragment to match against real reminders."""
+    text = message
+    if date_text:
+        text = text.replace(date_text, " ", 1)
+    words = [w for w in re.findall(r"[A-Za-z0-9'-]+", text)
+             if w.lower() not in _REMINDER_STOPWORDS]
+    return " ".join(words) or None
+
+
+def extract_reminder_delete(message: str) -> tuple[str | None, bool] | None:
+    """(title fragment or None, overdue_only) for a delete request, else None.
+    Needs both a delete verb and the word reminder(s) — high precision."""
+    if not (_REMINDER_DELETE_RE.search(message)
+            and _REMINDER_WORD_RE.search(message)):
+        return None
+    overdue = bool(_REMINDER_OVERDUE_RE.search(message))
+    return _reminder_title_words(message), overdue
+
+
+def is_reminder_reschedule(message: str) -> bool:
+    """A reschedule request needs a move verb and the word reminder(s). The
+    title fragment and new due date are extracted in the handler (the date must
+    be parsed first so its words don't pollute the title match)."""
+    return bool(_REMINDER_RESCHED_RE.search(message)
+                and _REMINDER_WORD_RE.search(message))
+
+
 def strip_due_text(text: str, date_text: str | None) -> str:
     """Remove the matched date phrase + any dangling connector so the title reads
     cleanly ("call the dentist tomorrow at 3pm" → "call the dentist")."""
@@ -336,6 +385,22 @@ def _reminders_handler(message: str) -> str:
     from src.reminders import reminders  # EventKit import deferred
     from src.eventkit.store import AccessDenied
     try:
+        # delete / reschedule BEFORE create: "move my reminder to 5pm" contains
+        # the create prefix "reminder to " and would otherwise add a new one
+        deletion = extract_reminder_delete(message)
+        if deletion is not None:
+            title_q, overdue = deletion
+            return reminders.remove(title_query=title_q, only_overdue=overdue,
+                                    list_name=extract_reminder_list(message))
+        if is_reminder_reschedule(message):
+            due, date_text = reminders.parse_due(message)
+            if due is None:
+                return "When should I move it to?"
+            title_q = _reminder_title_words(message, date_text)
+            if not title_q:
+                return "Which reminder should I move?"
+            return reminders.reschedule(title_q, due, date_text,
+                                        list_name=extract_reminder_list(message))
         parsed = extract_reminder(message)
         if parsed is not None:
             text, list_name = parsed
@@ -345,6 +410,10 @@ def _reminders_handler(message: str) -> str:
                 return "What should the reminder say?"
             return reminders.add(title, due=due, due_text=date_text,
                                  list_name=list_name)
+        # "due today" reads filter to today (live complaint: asking what's due
+        # today listed reminders from three different days)
+        if _DUE_TODAY_READ_RE.search(message):
+            return reminders.due_today_summary(extract_reminder_list(message))
         # read — optionally from a named list ("what's on my Work list?")
         return reminders.incomplete_summary(extract_reminder_list(message))
     except AccessDenied:
@@ -537,6 +606,12 @@ def build_pre_router(config: dict | None = None) -> "Callable[[str], str | None]
         # list"), so forcing reminders here is safe and symmetric with files.
         if extract_reminder(message) is not None \
                 or extract_reminder_list(message) is not None:
+            return "reminders"
+        # delete/reschedule are UNTRAINED write phrasings — the model has never
+        # seen them, so don't let it guess ("delete the run reminder" must not
+        # become a file search)
+        if extract_reminder_delete(message) is not None \
+                or is_reminder_reschedule(message):
             return "reminders"
         if extract_file_query(message) is None:
             return None  # not a file request (no clean term to search)

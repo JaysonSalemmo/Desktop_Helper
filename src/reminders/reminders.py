@@ -114,32 +114,147 @@ def _format_due(components) -> str | None:
     return str(fmt.stringFromDate_(date))
 
 
-def get_incomplete(list_name: str | None = None) -> list[str]:
-    """Incomplete reminders — "title" or "title (due …)" — all lists, or just
-    one if `list_name` given."""
-    store = request_access(EKEntityTypeReminder)
-    cal = _find_calendar(store, list_name)
-    calendars = [cal] if cal is not None else None
-    predicate = store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
-        None, None, calendars
-    )
-
+def _fetch_raw(store, predicate) -> list:
+    """EKReminder objects for a predicate (the async fetch, synchronized)."""
     done = threading.Event()
-    found: list[str] = []
+    found: list = []
 
     def callback(reminders):
-        for r in (reminders or []):
-            title = r.title()
-            if not title:
-                continue
-            due = _format_due(r.dueDateComponents())
-            found.append(f"{title} (due {due})" if due else str(title))
+        found.extend(reminders or [])
         done.set()
 
     store.fetchRemindersMatchingPredicate_completion_(predicate, callback)
     if not done.wait(timeout=FETCH_TIMEOUT):
         raise TimeoutError("Reminders fetch timed out")
-    return found
+    return [r for r in found if r.title()]
+
+
+def _label(r) -> str:
+    due = _format_due(r.dueDateComponents())
+    return f"{r.title()} (due {due})" if due else str(r.title())
+
+
+def _due_ts(r) -> float | None:
+    """Due date as a unix timestamp, or None for no due date."""
+    comps = r.dueDateComponents()
+    if comps is None:
+        return None
+    from Foundation import NSCalendar
+    date = NSCalendar.currentCalendar().dateFromComponents_(comps)
+    return date.timeIntervalSince1970() if date is not None else None
+
+
+def _calendars(store, list_name):
+    cal = _find_calendar(store, list_name)
+    return [cal] if cal is not None else None
+
+
+def _title_matches(title, query: str) -> bool:
+    """Every query word appears in the title (case-insensitive word subset).
+    NOT substring: the extractor strips request words, so "delete the go for a
+    run reminder" queries "go run" — which must still match "go for a run"."""
+    t = str(title).lower()
+    return all(w in t for w in query.lower().split())
+
+
+def get_incomplete(list_name: str | None = None) -> list[str]:
+    """Incomplete reminders — "title" or "title (due …)" — all lists, or just
+    one if `list_name` given."""
+    store = request_access(EKEntityTypeReminder)
+    predicate = store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
+        None, None, _calendars(store, list_name)
+    )
+    return [_label(r) for r in _fetch_raw(store, predicate)]
+
+
+def due_today_summary(list_name: str | None = None) -> str:
+    """Only what's actually due TODAY — plus an overdue count so old clutter is
+    visible without being listed as today's (the live complaint: "due today"
+    answered with reminders from three different days)."""
+    from datetime import datetime, timedelta
+
+    from Foundation import NSDate
+
+    store = request_access(EKEntityTypeReminder)
+    cals = _calendars(store, list_name)
+    start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    ns = lambda dt: NSDate.dateWithTimeIntervalSince1970_(dt.timestamp())
+
+    today = _fetch_raw(store, store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
+        ns(start), ns(start + timedelta(days=1)), cals))
+    overdue = _fetch_raw(store, store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
+        NSDate.distantPast(), ns(start), cals))
+
+    if not today and not overdue:
+        return "Nothing due today"
+    core = (f"Due today: {', '.join(_label(r) for r in today)}"
+            if today else "Nothing due today")
+    if overdue:
+        n = len(overdue)
+        core += f" — plus {n} overdue reminder{'s' if n > 1 else ''}"
+    return core
+
+
+def remove(title_query: str | None = None, only_overdue: bool = False,
+           list_name: str | None = None) -> str:
+    """Delete incomplete reminders by title match and/or overdue-ness. At least
+    one filter must be present — a bare "delete my reminders" wiping everything
+    is not a thing this does."""
+    import time as _time
+
+    if not title_query and not only_overdue:
+        return "Tell me which reminders to delete — by name, or 'the overdue ones'"
+
+    store = request_access(EKEntityTypeReminder)
+    predicate = store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
+        None, None, _calendars(store, list_name))
+    matches = _fetch_raw(store, predicate)
+    if title_query:
+        matches = [r for r in matches if _title_matches(r.title(), title_query)]
+    if only_overdue:
+        now = _time.time()
+        matches = [r for r in matches
+                   if (ts := _due_ts(r)) is not None and ts < now]
+    if not matches:
+        return "No matching reminders to delete"
+
+    deleted = []
+    for r in matches:
+        label = _label(r)
+        ok, _err = store.removeReminder_commit_error_(r, True, None)
+        if ok:
+            deleted.append(label)
+    if not deleted:
+        return "Couldn't delete those reminders"
+    n = len(deleted)
+    return f"Deleted {n} reminder{'s' if n > 1 else ''}: {', '.join(deleted)}"
+
+
+def reschedule(title_query: str, due, due_text: str | None,
+               list_name: str | None = None) -> str:
+    """Move the due date of the reminder matching `title_query`. With several
+    matches the oldest-due one moves (the usual intent: push the stale one),
+    and the reply says how many were left alone."""
+    store = request_access(EKEntityTypeReminder)
+    predicate = store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
+        None, None, _calendars(store, list_name))
+    matches = [r for r in _fetch_raw(store, predicate)
+               if _title_matches(r.title(), title_query)]
+    if not matches:
+        return f"No reminder matching '{title_query}'"
+
+    matches.sort(key=lambda r: ts if (ts := _due_ts(r)) is not None else float("inf"))
+    target = matches[0]
+    target.setDueDateComponents_(due)
+    ok, error = store.saveReminder_commit_error_(target, True, None)
+    if not ok:
+        detail = error.localizedDescription() if error is not None else "unknown error"
+        return f"Couldn't reschedule ({detail})"
+    extra = ""
+    if len(matches) > 1:
+        others = len(matches) - 1
+        extra = f" ({others} other match{'es' if others > 1 else ''} left unchanged)"
+    return f"Rescheduled: {target.title()}, now due {due_text}{extra}"
 
 
 def incomplete_summary(list_name: str | None = None) -> str:
