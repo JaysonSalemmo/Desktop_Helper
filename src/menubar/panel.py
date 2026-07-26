@@ -132,6 +132,12 @@ class _ChatInput(NSTextView):
         self._submit = submit
         self._placeholder = placeholder
         self._on_change = on_change
+        # no smart typography in a command box: macOS otherwise rewrites the
+        # typed ' into ’ (U+2019), which broke possessive extraction live
+        # ("Find kai's resume" searched for "kai’s resume" verbatim)
+        self.setAutomaticQuoteSubstitutionEnabled_(False)
+        self.setAutomaticDashSubstitutionEnabled_(False)
+        self.setAutomaticTextReplacementEnabled_(False)
         return self
 
     def keyDown_(self, event):

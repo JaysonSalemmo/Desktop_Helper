@@ -28,6 +28,7 @@ Generation runs on a per-turn KV cache (model.transformer.KVCache): the prompt
 is prefilled once, each later step feeds only the newest token, and a result
 injection prefills its chunk in one forward pass.
 """
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -46,6 +47,20 @@ class DispatchResult:
 
 # a handler takes the user's message and returns a result string to inject
 Handler = Callable[[str], str]
+
+# smart typography → ASCII, applied to every incoming message. macOS quote
+# substitution turns the typed ' into ’ (U+2019), which no extraction regex
+# matches (seen live: "Find kai’s resume" searched for the possessive verbatim).
+# ASCII also matches the training data, so the model sees its own distribution.
+_TYPOGRAPHY = str.maketrans({
+    "‘": "'", "’": "'",   # curly single quotes
+    "“": '"', "”": '"',   # curly double quotes
+    "–": "-", "—": "-",   # en/em dash
+})
+
+
+def normalize_typography(message: str) -> str:
+    return message.translate(_TYPOGRAPHY)
 
 
 class ToolDispatcher:
@@ -212,6 +227,7 @@ class ToolDispatcher:
 
     @torch.no_grad()
     def respond(self, message: str) -> DispatchResult:
+        message = normalize_typography(message)
         result = self._respond(message)
         if self.memory is not None:
             try:
@@ -221,6 +237,16 @@ class ToolDispatcher:
         return result
 
     def _respond(self, message: str) -> DispatchResult:
+        # degenerate input first: a message with no letters or digits (". . .",
+        # "???") gives the model nothing to condition on, and it free-associates
+        # training-shaped junk (seen live: dots in → a Python fruit list out).
+        # The voice path already guards this ("Didn't catch that"); this is the
+        # typed equivalent. No generation, no tool.
+        if not re.search(r"[^\W_]", message):
+            return DispatchResult(
+                response="Didn't catch that — what do you need?",
+                tool=None, tool_result=None)
+
         # pre-router first: for queries the model can't route but reliably
         # mis-routes (file search), force the tool with no generation at all
         if self.pre_router is not None:

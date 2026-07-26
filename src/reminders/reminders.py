@@ -158,6 +158,20 @@ def add(title: str, due=None, due_text: str | None = None,
     missing_list = bool(list_name) and cal is None
     if cal is None:
         cal = store.defaultCalendarForNewReminders()
+    if cal is None:
+        # defaultCalendarForNewReminders() legitimately returns nil (default
+        # list in an unwritable account, fresh TCC grant, or none configured)
+        # — seen live as EKErrorDomain Code=1 "No calendar has been set."
+        # Fall back to the first writable list rather than failing the save.
+        writable = [c for c in store.calendarsForEntityType_(EKEntityTypeReminder)
+                    if c.allowsContentModifications()]
+        # prefer the list actually named "Reminders" (the usual default) over
+        # whatever EventKit happens to enumerate first
+        cal = next((c for c in writable if str(c.title()).lower() == "reminders"),
+                   writable[0] if writable else None)
+    if cal is None:
+        return ("Couldn't save the reminder — no writable Reminders list. "
+                "Open the Reminders app and create a list first.")
 
     reminder = EKReminder.reminderWithEventStore_(store)
     reminder.setTitle_(title)
@@ -167,7 +181,10 @@ def add(title: str, due=None, due_text: str | None = None,
 
     ok, error = store.saveReminder_commit_error_(reminder, True, None)
     if not ok:
-        return f"Couldn't save the reminder ({error})"
+        # localizedDescription, not the raw NSError repr — the full
+        # "Error Domain=EKErrorDomain Code=1 …" dump leaked to the UI once
+        detail = error.localizedDescription() if error is not None else "unknown error"
+        return f"Couldn't save the reminder ({detail})"
 
     where = "" if missing_list or not list_name else f" to your {cal.title()} list"
     when = f", due {due_text}" if due_text else ""

@@ -16,7 +16,9 @@ a single `mdfind` call. Two deliberate choices shape the results:
 Coverage is Spotlight's: `mdfind` only returns what the index holds, so a file
 in a folder excluded from indexing (some dev trees are) won't appear.
 """
+import os
 import subprocess
+import time
 from pathlib import Path
 
 HOME = Path.home()
@@ -72,12 +74,62 @@ def _mtime(path: Path) -> float:
         return -1.0  # vanished between the index and the stat — sort it last
 
 
+# -- direct filesystem walk: the Spotlight-independent ground truth -----------
+# mdfind results are filtered by the caller's file-access permissions, and the
+# filtering is SILENT — the frozen app got zero results for a file that exists,
+# with no permission prompt ever shown (mdfind never touches the folders, so
+# TCC never asks). Walking the user-document dirs directly both finds the files
+# AND fires the proper "Desktop Helper would like to access…" prompt once.
+_WALK_DIRS = ("Documents", "Desktop", "Downloads")
+_WALK_DEPTH = 5        # levels below each root — documents live shallow
+_WALK_MAX_DIRS = 4000  # runaway guard for pathological trees
+_WALK_TIME_BUDGET = 8  # seconds — a reply beats an exhaustive scan
+
+
+def _walk_search(match, max_hits: int = 200) -> list[Path]:
+    """Files under the user-document dirs for which `match(Path) -> bool`,
+    bounded in depth, breadth, and time. Noise-pruned like the mdfind path."""
+    hits: list[Path] = []
+    visited = 0
+    deadline = time.monotonic() + _WALK_TIME_BUDGET
+    for base in _WALK_DIRS:
+        root = HOME / base
+        if not root.is_dir():
+            continue
+        base_depth = len(root.parts)
+        for dirpath, dirnames, filenames in os.walk(root):
+            visited += 1
+            if visited > _WALK_MAX_DIRS or time.monotonic() > deadline:
+                return hits
+            here = Path(dirpath)
+            if len(here.parts) - base_depth >= _WALK_DEPTH:
+                dirnames[:] = []  # depth cap: don't descend further
+            else:
+                dirnames[:] = [d for d in dirnames
+                               if not d.startswith(".") and d not in _NOISE_DIRS]
+            for name in filenames:
+                path = here / name
+                if not _is_noise(path) and match(path):
+                    hits.append(path)
+                    if len(hits) >= max_hits:
+                        return hits
+    return hits
+
+
 def search(query: str, max_results: int = 5) -> list[Path]:
-    """Matching paths, Library noise removed, newest first, capped."""
+    """Matching paths, Library noise removed, newest first, capped.
+
+    Spotlight first (indexed → instant, covers all of home); if it returns
+    NOTHING, fall back to the direct walk — an empty mdfind is
+    indistinguishable from silent permission filtering, so every empty
+    answer gets verified against the real filesystem."""
     query = query.strip()
     if not query:
         return []
     matches = [p for p in _mdfind(query) if not _is_noise(p)]
+    if not matches:
+        q = query.lower()
+        matches = _walk_search(lambda p: q in p.name.lower())
     matches.sort(key=_mtime, reverse=True)
     return matches[:max_results]
 
@@ -118,9 +170,13 @@ def _window_label(days: int) -> str:
 
 def search_recent(days: int, max_results: int = 5) -> list[Path]:
     """Actual files (not folders) modified in the last `days` days, noise
-    removed, newest first, capped."""
+    removed, newest first, capped. Same Spotlight-then-walk policy as
+    search(): an empty mdfind answer is verified against the real disk."""
     matches = [p for p in _mdfind_modified_since(days)
                if not _is_noise(p) and p.is_file()]
+    if not matches:
+        cutoff = time.time() - days * 86400
+        matches = _walk_search(lambda p: _mtime(p) >= cutoff)
     matches.sort(key=_mtime, reverse=True)
     return matches[:max_results]
 
