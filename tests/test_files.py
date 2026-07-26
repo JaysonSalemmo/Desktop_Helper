@@ -86,6 +86,43 @@ def test_recent_filters_folders_and_noise(tmp_path, monkeypatch):
 
 def test_recent_none_and_window_labels(monkeypatch):
     monkeypatch.setattr(files, "_mdfind_modified_since", lambda days: [])
+    # empty mdfind now falls back to the walk — pin it empty too
+    monkeypatch.setattr(files, "_walk_search", lambda match, max_hits=200: [])
     assert files.recent(7) == "No files worked on in the last week"
     assert files.recent(14) == "No files worked on in the last two weeks"
     assert files.recent(5) == "No files worked on in the last 5 days"
+
+
+def test_walk_fallback_when_spotlight_returns_nothing(tmp_path, monkeypatch):
+    # the live failure: the file EXISTS but mdfind silently returns zero
+    # (permission-filtered) — the walk must find it from the real disk
+    docs = tmp_path / "Documents"
+    docs.mkdir()
+    resume = docs / "Kai_Villamor_Resume.pdf"
+    resume.write_text("x")
+    hidden = docs / ".hidden_resume.pdf"
+    hidden.write_text("x")
+    noise = docs / "node_modules"
+    noise.mkdir()
+    (noise / "resume.js").write_text("x")
+
+    monkeypatch.setattr(files, "HOME", tmp_path)
+    monkeypatch.setattr(files, "_mdfind", lambda q: [])  # Spotlight stonewalls
+
+    out = files.find("resume")
+    assert "Kai_Villamor_Resume.pdf" in out
+    assert ".hidden_resume" not in out
+    assert "resume.js" not in out
+
+
+def test_walk_fallback_for_recent_files(tmp_path, monkeypatch):
+    docs = tmp_path / "Documents"
+    docs.mkdir()
+    fresh = docs / "today.md"
+    fresh.write_text("x")
+
+    monkeypatch.setattr(files, "HOME", tmp_path)
+    monkeypatch.setattr(files, "_mdfind_modified_since", lambda days: [])
+
+    out = files.recent(7)
+    assert "today.md" in out

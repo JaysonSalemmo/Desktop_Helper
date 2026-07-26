@@ -322,3 +322,41 @@ def test_unregistered_tool_falls_back_gracefully():
 
     assert result.tool == "weather"
     assert "not available" in result.tool_result
+
+
+def test_degenerate_input_never_reaches_the_model():
+    # seen live: ". . . . . . ." in → a hallucinated Python fruit list out.
+    # contentless messages get a canned nudge with zero forward passes.
+    tok = _tokenizer()
+    model = ScriptedModel([tok.eos_id], tok.vocab_size)
+    disp = _dispatcher(model, tok, {})
+    for junk in (". . . . . . .", "...", "???", "  ", "—", "!!!"):
+        result = disp.respond(junk)
+        assert result.tool is None
+        assert "catch" in result.response.lower()
+    assert model.i == 0, "model was called on contentless input"
+
+    # real input (including terse-but-real like "ok?") still dispatches
+    word = tok.encode("hi")[0]
+    model2 = ScriptedModel([word, tok.eos_id], tok.vocab_size)
+    result = _dispatcher(model2, tok, {}).respond("ok?")
+    assert model2.i > 0, "real input must still reach the model"
+
+
+def test_curly_quotes_normalized_before_handlers():
+    # live failure: macOS smart quotes turned "kai's" into "kai’s" (U+2019),
+    # no extraction regex matched, and Spotlight searched the possessive verbatim
+    from src.assistant.tools import extract_file_term
+
+    tok = _tokenizer()
+    script = [tok.tool_token_id("files"), tok.encode("ok")[0], tok.eos_id]
+    model = ScriptedModel(script, tok.vocab_size)
+    seen = {}
+
+    def fake_files(message: str) -> str:
+        seen["msg"] = message
+        return "found it"
+
+    _dispatcher(model, tok, {"files": fake_files}).respond("Find kai’s resume")
+    assert "’" not in seen["msg"], "curly quote leaked through to the handler"
+    assert extract_file_term(seen["msg"]) == "resume"

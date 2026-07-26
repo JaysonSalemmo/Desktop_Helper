@@ -457,6 +457,83 @@ def _task() -> str:
     ])()
 
 
+# due-focused reads — "When are my reminders set for?" was a live files-token
+# over-fire (run 6): no reminders training prompt mentioned timing at all
+_REMINDER_DUE_PROMPTS = [
+    "When are my reminders set for?",
+    "When are my reminders due?",
+    "What time are my reminders set for?",
+    "What do I have due today?",
+    "What's due today?",
+    "When is my next reminder?",
+    "Do I have anything due today?",
+    "What deadlines do I have coming up?",
+    "When is my next reminder due?",
+]
+
+_SHOPPING_ITEMS = ["milk", "eggs", "bread", "coffee", "butter", "paper towels",
+                   "dish soap", "olive oil", "bananas", "cereal", "chicken",
+                   "toothpaste", "batteries", "rice"]
+
+_REMINDER_WHENS = ["in an hour", "in 30 minutes", "in two hours", "tonight",
+                   "tomorrow morning", "tomorrow at 9am", "at 5pm", "at noon",
+                   "on Friday", "next Monday", "this weekend", "tomorrow at 3pm"]
+
+
+def _due_str() -> str:
+    # matches the app's readback format (reminders._format_due): timed
+    # reminders "Fri Jul 26 at 5:00 PM", date-only "Sat Jul 27"
+    dow = random.choice(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
+    mon = random.choice(["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])
+    day = random.randint(1, 28)
+    if random.random() < 0.7:
+        hour = random.randint(1, 12)
+        minute = random.choice(["00", "15", "30", "45"])
+        ampm = random.choice(["AM", "PM"])
+        return f"{dow} {mon} {day} at {hour}:{minute} {ampm}"
+    return f"{dow} {mon} {day}"
+
+
+def _reminder_create() -> tuple[str, str]:
+    # create phrasings — "Add milk to my shopping list" over-fired to files
+    # live (the word "list" pulled it), and "Remind me to …" was only ever
+    # caught by the fallback router. Both taught as reminders routes here.
+    task = _task()
+    low = task[0].lower() + task[1:]
+    when = random.choice(_REMINDER_WHENS)
+    roll = random.random()
+    if roll < 0.3:
+        item = random.choice(_SHOPPING_ITEMS)
+        lst = random.choice(["shopping", "groceries", "shopping", "grocery"])
+        prompt = random.choice([
+            f"Add {item} to my {lst} list",
+            f"Put {item} on my {lst} list",
+            f"Add {item} to the {lst} list",
+            f"Can you add {item} to my {lst} list?",
+        ])
+        result = f"Reminder added to your {lst.capitalize()} list: {item}"
+        reply = f"Added {item} to your {lst} list."
+    elif roll < 0.65:
+        prompt = random.choice([
+            f"Remind me to {low} {when}",
+            f"Set a reminder to {low} {when}",
+            f"Remind me {when} to {low}",
+        ])
+        result = f"Reminder added: {task}, due {when}"
+        reply = f"Done — I'll remind you to {low} {when}."
+    else:
+        prompt = random.choice([
+            f"Remind me to {low}",
+            f"Add a reminder to {low}",
+            f"Add {low} to my to-do list",
+            f"Set a reminder to {low}",
+        ])
+        result = f"Reminder added: {task}"
+        reply = f"Done — reminder added: {task}."
+    return _wrap("reminders", result, reply, prompt)
+
+
 def _reminders() -> tuple[str, str]:
     prompt = random.choice(_REMINDERS_PROMPTS)
     roll = random.random()
@@ -466,8 +543,21 @@ def _reminders() -> tuple[str, str]:
     if roll < 0.15:
         return _wrap("reminders", "No reminders set",
                      "You don't have any reminders set right now.", prompt)
+    if roll < 0.40:
+        return _reminder_create()
+    if roll < 0.60:
+        # due-focused read: every item carries its due, reply echoes them
+        prompt = random.choice(_REMINDER_DUE_PROMPTS)
+        items = [f"{_task()} (due {_due_str()})"
+                 for _ in range(random.randint(1, 3))]
+        result = ", ".join(items)
+        reply = f"Here's what's due: {_join(items)}."
+        return _wrap("reminders", result, reply, prompt)
 
-    items = [_task() for _ in range(random.randint(1, 4))]
+    # plain read — items occasionally carry a due, matching the app's
+    # get_incomplete readback ("title (due Fri Jul 26 at 5:00 PM)")
+    items = [_task() + (f" (due {_due_str()})" if random.random() < 0.3 else "")
+             for _ in range(random.randint(1, 4))]
     result = ", ".join(items)
     if len(items) == 1:
         reply = f"You have one reminder: {items[0]}."
@@ -516,14 +606,47 @@ def _track() -> tuple[str, str]:
     return title, artist
 
 
-def _spotify() -> tuple[str, str]:
-    prompt = random.choice(_SPOTIFY_PROMPTS)
-    if random.random() < 0.03:
-        return _disabled("spotify", prompt)
+_SPOTIFY_GENRES = ["jazz", "lo-fi", "classical", "rock", "indie", "hip-hop",
+                   "blues", "electronic", "folk", "R&B", "soul", "country"]
 
-    action = random.choice(["status", "pause", "skip", "volume_up", "volume_down"])
+
+def _play_prompt(title: str, artist: str) -> str:
+    # "Play a song by X" was a live files-token over-fire (run 6) — play
+    # requests were never in the training data at all. Taught explicitly here
+    # so the phrasing family routes to spotify (hard negative for files).
+    return random.choice([
+        f"Play a song by {artist}.",
+        f"Play something by {artist}",
+        f"Play another song by {artist}",
+        f"Play {title} by {artist}",
+        f"Play {title}",
+        f"Play {title} on Spotify",
+        f"Put on {title} by {artist}",
+        f"Can you play {title} by {artist}?",
+        f"Play some {random.choice(_SPOTIFY_GENRES)}",
+        f"Put on some {random.choice(_SPOTIFY_GENRES)}",
+        "Play some music",
+        "Put on some music",
+    ])
+
+
+def _spotify() -> tuple[str, str]:
+    if random.random() < 0.03:
+        return _disabled("spotify", random.choice(_SPOTIFY_PROMPTS))
+
     title, artist = _track()
     vol = random.randint(4, 100)
+
+    if random.random() < 0.3:
+        # play request — prompt and result kept coherent (unlike the loose
+        # status/pause pairing below) so the reply pattern reads naturally
+        prompt = _play_prompt(title, artist)
+        result = f"Now playing: {title} by {artist}"
+        reply = f"Now playing {title} by {artist}."
+        return _wrap("spotify", result, reply, prompt)
+
+    prompt = random.choice(_SPOTIFY_PROMPTS)
+    action = random.choice(["status", "pause", "skip", "volume_up", "volume_down"])
 
     if action == "status":
         result = f"{title} by {artist}, volume {vol}%"
