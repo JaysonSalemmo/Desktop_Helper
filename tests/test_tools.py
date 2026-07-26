@@ -490,3 +490,80 @@ def test_build_handlers_respects_feature_flags():
     assert handlers["weather"]("any") == "weather is disabled in config"
     assert handlers["screen"]("any") == "screen is disabled in config"
     assert handlers["launcher"]("open something") == "No matching app in the allowed apps list"
+
+
+def test_extract_reminder_delete():
+    from src.assistant.tools import extract_reminder_delete
+
+    # Kai's live case: clean up the overdue clutter
+    assert extract_reminder_delete("Delete the overdue reminders") == (None, True)
+    assert extract_reminder_delete(
+        "Delete the reminders where the day has already passed") == (None, True)
+    # title-targeted
+    title, overdue = extract_reminder_delete("Delete the go for a run reminder")
+    assert title == "go run"  # stopwords stripped; substring-matches the real title
+    assert overdue is False
+    # title + overdue
+    title, overdue = extract_reminder_delete("Remove the old go for a run reminders")
+    assert title == "go run"
+    assert overdue is True
+    # NOT deletes
+    assert extract_reminder_delete("Check my reminders") is None
+    assert extract_reminder_delete("delete the report file") is None  # no reminder word
+
+
+def test_reminder_reschedule_intent():
+    from src.assistant.tools import is_reminder_reschedule
+
+    assert is_reminder_reschedule("Move the run reminder to tomorrow at 8pm")
+    assert is_reminder_reschedule("Reschedule my dentist reminder for Friday")
+    assert not is_reminder_reschedule("Move the file to my desktop")  # no reminder word
+    assert not is_reminder_reschedule("Check my reminders")           # no move verb
+
+
+def test_reminders_handler_delete_and_due_today(monkeypatch):
+    from src.assistant import tools
+
+    calls = {}
+
+    class FakeReminders:
+        @staticmethod
+        def remove(title_query=None, only_overdue=False, list_name=None):
+            calls["remove"] = (title_query, only_overdue)
+            return "Deleted 2 reminders: x, y"
+
+        @staticmethod
+        def due_today_summary(list_name=None):
+            calls["due_today"] = True
+            return "Due today: go for a run (due 8:00 PM) — plus 3 overdue reminders"
+
+        @staticmethod
+        def incomplete_summary(list_name=None):
+            calls["plain"] = True
+            return "everything"
+
+        @staticmethod
+        def parse_due(text):
+            return None, None
+
+    import sys
+    monkeypatch.setitem(sys.modules, "src.reminders.reminders", None)
+    monkeypatch.setattr("src.reminders.reminders", FakeReminders, raising=False)
+
+    out = tools._reminders_handler("Delete the overdue reminders")
+    assert "Deleted" in out and calls["remove"] == (None, True)
+
+    out = tools._reminders_handler("What reminders are due today?")
+    assert "Due today" in out and calls.get("due_today")
+
+    out = tools._reminders_handler("Check my reminders")
+    assert calls.get("plain")
+
+
+def test_pre_router_forces_reminder_deletes():
+    from src.assistant.tools import build_pre_router
+
+    pre = build_pre_router()
+    assert pre("Delete the overdue reminders") == "reminders"
+    assert pre("Move the run reminder to tomorrow at 8pm") == "reminders"
+    assert pre("delete the old report file") != "reminders"  # file op stays files-ish
