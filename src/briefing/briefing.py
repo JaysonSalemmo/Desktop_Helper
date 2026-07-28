@@ -1,5 +1,5 @@
 """
-Morning briefing — weather + today's calendar + headlines in one message.
+Morning briefing — weather + today's calendar, when there's something to say.
 
 Pure composition from the live tool backends: no model involved, so it's
 fast and word-perfect by construction. Sections degrade independently — a
@@ -42,11 +42,21 @@ def _greeting(name: str, now: datetime) -> str:
     return f"Good {part}, {name} — {date}."
 
 
+_EMPTY_AGENDA = ("no events", "nothing scheduled", "access not granted")
+
+
+def _is_empty_agenda(agenda: str) -> bool:
+    low = agenda.strip().lower()
+    return not low or any(low.startswith(p) for p in _EMPTY_AGENDA)
+
+
 def compose_sections(config: dict, weather_fn=_default_weather,
-                     calendar_fn=_default_calendar, news_fn=_default_news,
+                     calendar_fn=_default_calendar, news_fn=None,
                      now: datetime | None = None) -> list[str]:
-    """The briefing as separate sections (greeting, weather, calendar,
-    headlines) — the chat panel shows each as its own bubble."""
+    """The briefing as separate sections (greeting, weather, and today's
+    calendar only if it has events). `news_fn` is accepted and ignored — the
+    headlines section was removed; the parameter stays so existing callers and
+    tests don't break."""
     now = now or datetime.now()
     flags = config.get("features", {})
     sections = [_greeting(config["user"]["name"], now)]
@@ -59,15 +69,12 @@ def compose_sections(config: dict, weather_fn=_default_weather,
 
     if flags.get("calendar", True):
         try:
-            sections.append(f"Calendar: {calendar_fn(config)}")
-        except Exception:
-            pass
-
-    if flags.get("news", True):
-        try:
-            headlines = news_fn(config)
-            if headlines:
-                sections.append("Headlines:\n" + "\n".join(f"• {h}" for h in headlines))
+            agenda = calendar_fn(config)
+            # only when there IS something — "No events today" is noise, and
+            # headlines were dropped entirely (2026-07-27, Kai): the briefing
+            # should be a glance, not a wall of text
+            if agenda and not _is_empty_agenda(agenda):
+                sections.append(f"Calendar: {agenda}")
         except Exception:
             pass
 

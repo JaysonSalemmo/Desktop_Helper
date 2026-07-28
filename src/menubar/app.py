@@ -63,7 +63,7 @@ class DesktopHelperMenuBar(rumps.App):
         self.transcriber = None
         if self.voice_enabled:
             from src.voice.voice import Transcriber, VoiceRecorder
-            self.recorder = VoiceRecorder()
+            self.recorder = VoiceRecorder(on_level=self._presence_level)
             self.transcriber = Transcriber()
 
         self.status_item = rumps.MenuItem("Loading model…")  # no callback → non-clickable
@@ -102,6 +102,9 @@ class DesktopHelperMenuBar(rumps.App):
             self._start_wake()
         self._hotkeys = None
         self._start_hotkey()  # before the load thread — _load_model reads _hotkeys
+        if self.config.get("features", {}).get("orb_ui", True):
+            # scheduled, so it runs once the main loop is up
+            self._on_main(self._park_orb)
         threading.Thread(target=self._load_model, daemon=True).start()
         if self.config.get("features", {}).get("startup_briefing", False):
             # briefing needs no model — deliver as a notification while it loads
@@ -170,12 +173,32 @@ class DesktopHelperMenuBar(rumps.App):
         hotkey_hint = f"  ({combo_symbols(speak_combo)})" if hotkey_live else ""
         self._ready_status = f"Ready on {device.type}{hotkey_hint}"
         self._on_main(self._set_status, TITLE_READY, self._ready_status)
+        # the orb is a presence, not a window — it takes its place on the
+        # desktop as soon as there's a model behind it, and breathes there
+        if self.config.get("features", {}).get("orb_ui", True):
+            self._on_main(self._park_orb)
         if self.transcriber is not None:
             self.transcriber.warm_up()  # download/load whisper off the hot path
 
     def _set_status(self, title: str, status: str) -> None:
         self.title = title
         self.status_item.title = status
+
+    # -- presence (the header's living indicator) ----------------------------
+
+    def _presence(self, state: str) -> None:
+        """Drive the panel's presence view. Never forces the panel into
+        existence — a state change is not a reason to build the window.
+        getattr: the recorder binds these before _panel is assigned."""
+        panel = getattr(self, "_panel", None)
+        if panel is not None:
+            panel.set_presence(state)
+
+    def _presence_level(self, level: float, bands=None) -> None:
+        """Called from the AUDIO thread — hop to the main thread for AppKit."""
+        panel = getattr(self, "_panel", None)
+        if panel is not None:
+            self._on_main(panel.set_presence_level, level, bands)
 
     def _start_hotkey(self) -> None:
         try:
@@ -242,6 +265,7 @@ class DesktopHelperMenuBar(rumps.App):
 
         self.busy = True
         self.title = TITLE_THINKING
+        self._presence("thinking")
         threading.Thread(target=self._respond, args=(message,), daemon=True).start()
 
     def _toggle_voice_replies(self, sender) -> None:
@@ -293,6 +317,7 @@ class DesktopHelperMenuBar(rumps.App):
         wakeword.chirp()
         self.busy = True
         self.title = TITLE_LISTENING
+        self._presence("listening")
         self.status_item.title = "Listening… (speak now)"
         self._get_panel().set_action_state("Speak", True, "🎤 …")
         if self._wake is not None:
@@ -315,6 +340,7 @@ class DesktopHelperMenuBar(rumps.App):
 
     def _wake_capture_done(self) -> None:
         self.title = TITLE_THINKING
+        self._presence("thinking")
         self.status_item.title = "Transcribing…"
         self._get_panel().set_action_state("Speak", False)
 
@@ -351,15 +377,30 @@ class DesktopHelperMenuBar(rumps.App):
 
     def _get_panel(self):
         if self._panel is None:
-            from src.menubar.panel import ReplyPanel, install_edit_menu
+            from src.menubar.panel import install_edit_menu
             install_edit_menu()  # ⌘C/⌘A/⌘V in the panel — needs the app fully up
             actions = {}
             if self.voice_enabled:
                 actions["Speak"] = lambda: self._toggle_voice(None)
             actions["Briefing"] = lambda: self._briefing_clicked(None)
-            self._panel = ReplyPanel(on_followup=self._followup, actions=actions,
-                                     on_visibility=self._panel_visibility)
+            # the orb is the default front-end; features.orb_ui=false restores
+            # the classic chat panel (same public API, so nothing else changes)
+            if self.config.get("features", {}).get("orb_ui", True):
+                from src.menubar.orb import OrbWindow as Surface
+            else:
+                from src.menubar.panel import ReplyPanel as Surface
+            self._panel = Surface(on_followup=self._followup, actions=actions,
+                                  on_visibility=self._panel_visibility)
         return self._panel
+
+    def _park_orb(self) -> None:
+        """Put the orb on the desktop. Before the model is ready it shows the
+        loading sweep, so the ~50s startup is visible instead of a dead orb."""
+        surface = self._get_panel()
+        park = getattr(surface, "park", None)
+        if park is not None:
+            park()
+        self._presence("dormant" if self.dispatcher is not None else "loading")
 
     def _panel_visibility(self, visible: bool) -> None:
         """Grey out 'Show Chat' while the window is showing, restore it when
@@ -397,6 +438,7 @@ class DesktopHelperMenuBar(rumps.App):
                 rumps.alert("Desktop Helper", f"Couldn't open the microphone: {exc}")
                 return
             self.title = TITLE_LISTENING
+            self._presence("listening")
             self.status_item.title = f"Listening… ({self.hotkey_combo} to stop)"
             if self.voice_enabled:
                 self.speak_item.title = "Stop listening"
@@ -407,6 +449,7 @@ class DesktopHelperMenuBar(rumps.App):
         self.busy = True
         self.title = TITLE_THINKING
         self.status_item.title = "Transcribing…"
+        self._presence("thinking")
         if self.voice_enabled:
             self.speak_item.title = getattr(self, "_speak_idle_title", "Speak")
         self._get_panel().set_action_state("Speak", False)
@@ -434,20 +477,42 @@ class DesktopHelperMenuBar(rumps.App):
     # -- inference (worker thread) ------------------------------------------
 
     def _respond(self, message: str, spoken: bool = False) -> None:
+        spoken_reply = None
         try:
             result = self.dispatcher.respond(message)
             body = result.response
             if spoken and self.voice_replies:
-                # you talked to it — it talks back
-                from src.voice.voice import speak
-                speak(result.response)
+                spoken_reply = result.response  # you talked to it — it talks back
         except Exception as exc:
             body = f"Error: {exc}"
+        # show first, THEN speak: _show_reply drops the orb to dormant, so
+        # starting playback before it would have the reset stomp the speaking state
         self._on_main(self._show_reply, message, body)
+        if spoken_reply is not None:
+            self._speak_aloud(spoken_reply)
+
+    def _speak_aloud(self, text: str) -> None:
+        """Speak, with the orb moving to the VOLUME of the speech (not merely
+        'on') — `speak` plays the utterance itself so it can meter amplitude."""
+        from src.voice.voice import is_speaking, speak
+        self._on_main(self._presence, "speaking")
+        speak(text, on_level=self._presence_level)
+
+        def settle() -> None:
+            import time
+            deadline = time.time() + 180
+            while time.time() < deadline and not is_speaking():
+                time.sleep(0.05)  # synthesis runs before playback begins
+            while time.time() < deadline and is_speaking():
+                time.sleep(0.1)
+            self._on_main(self._presence, "dormant")
+
+        threading.Thread(target=settle, daemon=True).start()
 
     def _show_reply(self, message: str, body: str) -> None:
         self.busy = False
         self.title = TITLE_READY
+        self._presence("dormant")
         self.status_item.title = getattr(self, "_ready_status", "Ready")
         self._show_alert(message, body)
 

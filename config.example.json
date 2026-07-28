@@ -9,6 +9,7 @@
         }
     ],
     "features": {
+        "orb_ui": true,
         "voice": false,
         "voice_replies": true,
         "wake_word": false,
