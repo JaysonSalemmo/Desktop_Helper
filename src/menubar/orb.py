@@ -86,16 +86,24 @@ from Quartz import (
 from src.menubar.panel import _ChatInput, _Submitter, install_edit_menu
 
 # -- geometry ----------------------------------------------------------------
-ORB_BOX = 150                   # parked window: orb + room for ripples
+# ONE size in both states. The orb used to grow 150 -> 176 on bloom, animated on
+# its own Core Animation curve — the only part of the transition not derived
+# from the window — and that independent easing read as the circle twitching
+# when it should have been perfectly still. Same box parked and docked means
+# there is nothing left to animate.
+ORB_BOX = 176                   # parked window: orb + room for the ring
 OPEN_W, OPEN_H = 460, 460       # bloomed conversation surface
-ORB_SMALL = 176                 # docked a little larger than parked
+ORB_SMALL = 176                 # docked at exactly the same size
 MARGIN = 18
 TRAFFIC_CLEARANCE = 76   # standard buttons sit at x=7/27/47
 INPUT_H = 32
-TEXT_BOTTOM = 76         # the message is anchored HERE and grows upward
-TEXT_MAX_H = 160         # …no further: beyond this it clips instead of
+TEXT_BOTTOM = 100        # the message is anchored HERE and grows upward —
+                         # lifted off the ask box so the exchange sits in the
+                         # open space under the orb rather than crowding it
+TEXT_MAX_H = 140         # …no further: beyond this it clips instead of
                          # spilling over the ask box (the briefing did exactly
-                         # that — long text ignored the frame entirely)
+                         # that — long text ignored the frame entirely). Capped
+                         # so a long reply still clears the orb's bars.
 TEXT_TOP = TEXT_BOTTOM + TEXT_MAX_H
 SCROLL_STEP = 8.0        # wheel delta that advances one message
 LEVEL_SMOOTHING = 0.10   # seconds — short enough that single words still show
@@ -106,7 +114,8 @@ SWAP_S = 0.40           # message swap: fade + a small rise into place
 # smoothed it by adding lag; this smooths the SIGNAL and keeps the attack.
 LEVEL_ATTACK = 0.42      # fraction of the gap closed when getting louder
 LEVEL_RELEASE = 0.12     # …and when getting quieter
-BLOOM_S = 0.42                  # bloom / collapse duration
+BLOOM_S = 0.26                  # bloom / collapse duration — short,
+                                # so any sampling lag is over quickly
 EDGE_GAP = 24                   # default parking distance from the screen edge
 
 BARS = 56                # spokes in the ring (Bensound-style visualiser)
@@ -120,6 +129,7 @@ STATE_FADE_S = 0.45      # core easing between its fixed per-state sizes
 PROGRESS_SPAN = 0.22     # how much of the loading ring the sweeping bar covers
 PROGRESS_PERIOD = 1.15   # seconds per lap
 SWEEP_FADE_S = 0.45      # loading arc dissolves into the live orb
+DOCKED_Y = OPEN_H - MARGIN - ORB_SMALL / 2 - ORB_BOX / 2  # orb y when open
 DOCK_SCALE = ORB_SMALL / ORB_BOX  # how far the orb shrinks when docked
 
 # per-state: (core scale, ring spin period s, bar opacity, color fn)
@@ -485,11 +495,12 @@ class _OrbHitView(NSView):
     """Click to bloom, drag to reparks the orb. Implemented manually rather than
     movableByWindowBackground so a click and a drag stay distinguishable."""
 
-    def initWithFrame_onClick_(self, frame, on_click):
+    def initWithFrame_onClick_onDrag_(self, frame, on_click, on_drag):
         self = objc.super(_OrbHitView, self).initWithFrame_(frame)
         if self is None:
             return None
         self._on_click = on_click
+        self._on_drag = on_drag
         self._down = None
         self._moved = 0.0
         self._radius = frame.size.width / 2.0
@@ -525,6 +536,8 @@ class _OrbHitView(NSView):
         self._moved += abs(dx) + abs(dy)
         frame = win.frame()
         win.setFrameOrigin_(NSPoint(frame.origin.x + dx, frame.origin.y + dy))
+        if self._on_drag is not None:
+            self._on_drag()
 
     def mouseUp_(self, event):
         was_click = self._down is not None and self._moved < 4.0
@@ -545,6 +558,9 @@ class OrbWindow:
         self._pending_question = None
         self._index = 0          # 0 = newest; scrolling up walks backwards
         self._open = False
+        self._animating = False
+        self._anchor = None   # the orb's screen point, held across fast toggles
+        self._bloom = 0       # generation counter: stale completions must not fire
 
         # TITLED (not borderless): Kai wants the real stoplight buttons, and
         # miniaturize only exists on a titled window. The titlebar is
@@ -643,8 +659,8 @@ class OrbWindow:
 
         # -- the orb itself, on top of everything ---------------------------
         self._orb = OrbView(ORB_BOX)
-        self._hit = _OrbHitView.alloc().initWithFrame_onClick_(
-            NSMakeRect(0, 0, ORB_BOX, ORB_BOX), self._orb_clicked)
+        self._hit = _OrbHitView.alloc().initWithFrame_onClick_onDrag_(
+            NSMakeRect(0, 0, ORB_BOX, ORB_BOX), self._orb_clicked, self._orb_dragged)
         self._hit.addSubview_(self._orb.view)
         content.addSubview_(self._hit)
 
@@ -653,10 +669,53 @@ class OrbWindow:
 
     def relayout(self) -> None:
         """Re-place everything for the window's CURRENT size (resize, restore)."""
+        # The resize stream is what moves the orb, and it must NOT be
+        # suppressed during the bloom. Animating the orb's frame alongside the
+        # window was tried and put the snap back: `animator().setFrame_()`
+        # applies this view's frame immediately instead of interpolating it, so
+        # the orb jumped to its destination while the window was still the old
+        # size. Tracking the real size a frame behind beats being wrong outright.
         bounds = self.panel.contentView().bounds()
         self._place(bounds.size.width, bounds.size.height)
 
-    def _place(self, width: float, height: float) -> None:
+    def _settle(self, token=None) -> None:
+        """End-of-bloom cleanup, ignored if a newer transition has started.
+
+        Without the token the FIRST animation's completion fires midway through
+        the second, clearing `_animating` and letting relayout stamp on an
+        in-flight bloom — the erratic twitching when the orb is spammed."""
+        if token is not None and token != self._bloom:
+            return
+        self._animating = False
+        self._anchor = None
+        self.relayout()
+
+    def _orb_frame(self, width: float, height: float):
+        """Where the orb sits inside a window of this size — CONTINUOUS in size,
+        with no branch on open/collapsed.
+
+        This is what fixed the brief snap. The two states want different
+        in-window positions (155,279 open vs 0,0 collapsed), so a state flag
+        made the position *discontinuous*: for the instant after the flag
+        flipped but before the window had resized, the orb drew a full
+        155x279 away — southwest when collapsing, northeast when expanding,
+        exactly as Kai described. Blending on the window's actual height
+        removes the discontinuity, so there is no jump to see at any point.
+        """
+        docked = height - MARGIN - ORB_SMALL / 2 - ORB_BOX / 2  # pinned up top
+        if height >= OPEN_H:
+            y = docked                    # larger window (zoom): stay up top
+        else:
+            # Between parked and open, y must be LINEAR in height. The window's
+            # origin also moves linearly as it resizes, and the two cancel only
+            # if this side is linear too — an earlier blend of `docked` (itself
+            # height-dependent) made y quadratic, so the terms didn't cancel and
+            # the orb swung ~39px out and back: the "bouncing like a ball".
+            t = max(0.0, (height - ORB_BOX) / max(1.0, OPEN_H - ORB_BOX))
+            y = t * DOCKED_Y
+        return NSMakeRect(width / 2 - ORB_BOX / 2, y, ORB_BOX, ORB_BOX)
+
+    def _place(self, width: float, height: float, move_orb: bool = True) -> None:
         """Lay the surface out for an EXPLICIT size.
 
         Callers that are starting a resize animation pass the TARGET size
@@ -668,17 +727,17 @@ class OrbWindow:
         any path that doesn't go through an animation."""
         if width < 2 or height < 2:
             return
+        CATransaction.begin()
+        # a layer-backed view eases frame changes by default; for a direct
+        # re-place we want it exactly where we put it, immediately
+        CATransaction.setDisableActions_(True)
+        if move_orb:
+            self._hit.setFrame_(self._orb_frame(width, height))
         if not self._open:
-            # parked: dead centre of the little window
-            self._hit.setFrame_(NSMakeRect(width / 2 - ORB_BOX / 2,
-                                           height / 2 - ORB_BOX / 2,
-                                           ORB_BOX, ORB_BOX))
+            CATransaction.commit()
             return
 
         self._chrome.setFrame_(NSMakeRect(0, 0, width, height))
-        self._hit.setFrame_(NSMakeRect(width / 2 - ORB_BOX / 2,
-                                       height - MARGIN - ORB_SMALL / 2 - ORB_BOX / 2,
-                                       ORB_BOX, ORB_BOX))
         text_x = MARGIN + 16
         text_w = max(40.0, width - 2 * text_x)
         self._transcript.setFrame_(NSMakeRect(
@@ -688,6 +747,7 @@ class OrbWindow:
         self._input_box.setFrame_(NSMakeRect(MARGIN, MARGIN, input_w, INPUT_H))
         self._input.setFrame_(NSMakeRect(MARGIN, MARGIN, input_w, INPUT_H))
         self._layout_text()
+        CATransaction.commit()
 
     def _chrome_buttons_visible(self, visible: bool) -> None:
         """Stoplights belong to the conversation surface, not the bare orb."""
@@ -725,6 +785,19 @@ class OrbWindow:
                 min(y, screen.origin.y + screen.size.height - h - 8))
         return NSMakeRect(x, y, w, h)
 
+    def _anchor_point(self):
+        """The screen point the orb should hold through a transition.
+
+        Recomputing this per click is what made spamming the orb wander: a
+        second click lands mid-animation, when the window is halfway between
+        sizes, so `_orb_center()` reads geometry that matches neither state and
+        the error compounds with every toggle. Computed once from a settled
+        window and reused until things come to rest."""
+        if self._animating and self._anchor is not None:
+            return self._anchor
+        self._anchor = self._orb_center()
+        return self._anchor
+
     def _orb_center(self):
         f = self.panel.frame()
         if self._open:
@@ -733,6 +806,10 @@ class OrbWindow:
         return (f.origin.x + ORB_BOX / 2, f.origin.y + ORB_BOX / 2)
 
     # -- bloom / collapse --------------------------------------------------
+
+    def _orb_dragged(self) -> None:
+        """The orb was moved: any cached screen anchor is stale."""
+        self._anchor = None
 
     def _orb_clicked(self) -> None:
         self.collapse() if self._open else self.expand()
@@ -743,21 +820,30 @@ class OrbWindow:
         self._present_window()
         if self._open:
             return
-        cx, cy = self._orb_center()  # measure BEFORE flipping the state flag
+        cx, cy = self._anchor_point()  # measure BEFORE flipping the state flag
         self._open = True
         self._chrome_buttons_visible(True)
         if self._on_visibility is not None:
             self._on_visibility(True)
         target = self._clamp(cx - OPEN_W / 2,
                              cy - OPEN_H + MARGIN + ORB_SMALL / 2, OPEN_W, OPEN_H)
+        # The window target is chosen so the orb's SCREEN position is identical
+        # before and after. Animating the window origin and the orb's frame
+        # together, with one timing curve, therefore holds the orb visually
+        # still through the whole bloom — smooth by construction rather than by
+        # tuning. (Snapping the orb to its new frame first, as this used to,
+        # made it jump and then crawl back as resize notifications arrived.)
+        self._animating = True
+        self._bloom += 1
+        token = self._bloom
+        self._place(OPEN_W, OPEN_H, move_orb=False)
         NSAnimationContext.beginGrouping()
         NSAnimationContext.currentContext().setDuration_(BLOOM_S)
-        NSAnimationContext.currentContext().setCompletionHandler_(self.relayout)
+        NSAnimationContext.currentContext().setCompletionHandler_(
+            lambda: self._settle(token))
         self.panel.animator().setFrame_display_(target, True)
         self._chrome.animator().setAlphaValue_(1.0)
         NSAnimationContext.endGrouping()
-        self._place(OPEN_W, OPEN_H)  # the size we're animating TO, not from
-        self._orb.set_scale(DOCK_SCALE, BLOOM_S)
         self._hit.setHitRadius_(ORB_BOX / 2 * DOCK_SCALE)
         self._render()
         self.panel.makeFirstResponder_(self._input)
@@ -766,21 +852,23 @@ class OrbWindow:
         """Fold back to the orb, leaving it where the surface's orb sat."""
         if not self._open:
             return
-        cx, cy = self._orb_center()  # measure BEFORE flipping the state flag
+        cx, cy = self._anchor_point()  # measure BEFORE flipping the state flag
         self._open = False
         self._chrome_buttons_visible(False)
         if self._on_visibility is not None:
             self._on_visibility(False)
         target = self._clamp(cx - ORB_BOX / 2, cy - ORB_BOX / 2, ORB_BOX, ORB_BOX)
 
+        self._animating = True
+        self._bloom += 1
+        token = self._bloom
         NSAnimationContext.beginGrouping()
         NSAnimationContext.currentContext().setDuration_(BLOOM_S)
-        NSAnimationContext.currentContext().setCompletionHandler_(self.relayout)
+        NSAnimationContext.currentContext().setCompletionHandler_(
+            lambda: self._settle(token))
         self._chrome.animator().setAlphaValue_(0.0)
         self.panel.animator().setFrame_display_(target, True)
         NSAnimationContext.endGrouping()
-        self._place(ORB_BOX, ORB_BOX)
-        self._orb.set_scale(1.0, BLOOM_S)
         self._hit.setHitRadius_(ORB_BOX / 2)
 
     # -- transcript --------------------------------------------------------
