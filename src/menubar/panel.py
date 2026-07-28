@@ -44,6 +44,8 @@ from AppKit import (
 from Foundation import NSObject, NSString
 from Quartz import CABasicAnimation, CAMediaTimingFunction
 
+from src.menubar.presence import Presence
+
 ANIM_S = 0.28  # bubble entrance / scroll glide duration
 
 WIDTH, HEIGHT = 500, 380
@@ -54,6 +56,7 @@ INPUT_MIN_H = 30   # input starts one line tall…
 INPUT_MAX_H = 120  # …grows with content up to here, then scrolls (iMessage-style)
 INPUT_INSET = 6    # text padding inside the rounded input
 ASK_W = 52
+PRESENCE_W, PRESENCE_H = 30, 16  # the living indicator in the header
 BUBBLE_MAX_W = 340
 BUBBLE_PAD_X = 12
 BUBBLE_PAD_Y = 7
@@ -162,11 +165,20 @@ class _ChatInput(NSTextView):
 
     def drawRect_(self, rect):
         objc.super(_ChatInput, self).drawRect_(rect)
-        if self.string() == "":
-            NSString.stringWithString_(self._placeholder).drawAtPoint_withAttributes_(
-                (INPUT_INSET + 2, INPUT_INSET),
-                {NSFontAttributeName: self.font(),
-                 NSForegroundColorAttributeName: NSColor.placeholderTextColor()})
+        if self.string() != "":
+            return
+        attrs = {NSFontAttributeName: self.font(),
+                 NSForegroundColorAttributeName: NSColor.placeholderTextColor()}
+        text = NSString.stringWithString_(self._placeholder)
+        if getattr(self, "_center_placeholder", False):
+            # match the typed text's alignment/inset exactly — a placeholder
+            # drawn at a fixed corner is what made the ask box look off-centre
+            inset = self.textContainerInset()
+            size = text.sizeWithAttributes_(attrs)
+            origin = ((self.bounds().size.width - size.width) / 2.0, inset.height)
+        else:
+            origin = (INPUT_INSET + 2, INPUT_INSET)
+        text.drawAtPoint_withAttributes_(origin, attrs)
 
 
 class _CloseWatcher(NSObject):
@@ -230,12 +242,19 @@ class ReplyPanel:
         header.setWantsLayer_(True)
         header.layer().setBackgroundColor_(
             NSColor.windowBackgroundColor().CGColor())
-        title = NSTextField.labelWithString_("◆ Desktop Helper")
+        # the living indicator replaces the old static "◆" glyph — it wakes on
+        # input and settles when idle (see presence.py)
+        self.presence = Presence(PRESENCE_W, PRESENCE_H)
+        self.presence.view.setFrame_(
+            NSMakeRect(TRAFFIC_LIGHT_CLEARANCE, (HEADER_H - PRESENCE_H) / 2,
+                       PRESENCE_W, PRESENCE_H))
+        header.addSubview_(self.presence.view)
+        title = NSTextField.labelWithString_("Desktop Helper")
         title.setFont_(NSFont.boldSystemFontOfSize_(12))
         title.setTextColor_(NSColor.secondaryLabelColor())
         # offsets eyeballed with Kai against the traffic-light line
-        title.setFrame_(NSMakeRect(TRAFFIC_LIGHT_CLEARANCE, (HEADER_H - 15) / 2 - 0.5,
-                                   200, 15))
+        title.setFrame_(NSMakeRect(TRAFFIC_LIGHT_CLEARANCE + PRESENCE_W + 8,
+                                   (HEADER_H - 15) / 2 - 0.5, 200, 15))
         header.addSubview_(title)
         actions = dict(actions or {})
         actions.setdefault("Clear", self.clear)
@@ -426,8 +445,22 @@ class ReplyPanel:
     # -- api (main thread only) ----------------------------------------------
 
     def _notify_visible(self, visible: bool) -> None:
+        # a hidden window animates nothing (battery — this app sits open all day)
+        if visible:
+            self.presence.resume()
+        else:
+            self.presence.suspend()
         if self._on_visibility is not None:
             self._on_visibility(visible)
+
+    def set_presence(self, state: str) -> None:
+        """dormant | listening | thinking | speaking."""
+        self.presence.set_state(state)
+
+    def set_presence_level(self, level: float, bands=None) -> None:
+        """0..1 — live mic amplitude while listening (implicitly smoothed).
+        `bands` is the orb's spectrum; the classic panel's waveform ignores it."""
+        self.presence.set_level(level)
 
     def _present_window(self) -> None:
         self.panel.orderFrontRegardless()
