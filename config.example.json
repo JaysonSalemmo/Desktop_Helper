@@ -25,7 +25,7 @@
         "startup_briefing": true
     },
     "files": {
-        "max_results": 5
+        "max_results": 4
     },
     "stocks": {
         "watchlist": ["AAPL", "NVDA", "MSFT"]

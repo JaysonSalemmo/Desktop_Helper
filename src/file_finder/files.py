@@ -28,9 +28,13 @@ _MDFIND_TIMEOUT = 5
 
 # path components that mark a result as noise rather than a user document
 _NOISE_DIRS = {"Library", "node_modules", "__pycache__", "site-packages",
-               "venv", "DerivedData", ".build"}
+               "venv", "DerivedData", ".build",
+               # our own PyInstaller output dominated "recent documents" with
+               # BUNDLE-00.toc / COLLECT-00.toc and bundled site-packages
+               "build", "dist", ".venv", ".git", "Caches"}
 # build/compiled artifacts — never what someone searches for by name
-_NOISE_SUFFIXES = {".pyc", ".pyo", ".class", ".o", ".so"}
+_NOISE_SUFFIXES = {".pyc", ".pyo", ".class", ".o", ".so", ".toc", ".pkg",
+                   ".dylib", ".egg-info"}
 
 
 def _is_noise(path: Path) -> bool:
@@ -57,6 +61,26 @@ def _mdfind(query: str) -> list[Path]:
     if out.returncode != 0:
         return []
     return [Path(line) for line in out.stdout.splitlines() if line]
+
+
+def _short_dir(path: Path) -> str:
+    """A location you can read at a glance.
+
+    Full paths are the enemy of a one-glance answer: a result list of
+    `~/Documents/Side Projects/Desktop_Helper/build/Desktop Helper` entries
+    wraps over several lines each and buries the filename. Shallow paths are
+    shown whole; deeper ones collapse to `…/<folder>`, which is what you
+    actually need to tell two copies apart."""
+    shown = _human(path)
+    parts = shown.split("/")
+    if len(parts) <= 3:           # "~", "Documents", "Work"
+        return shown
+    return "…/" + parts[-1]
+
+
+def _format(paths: list[Path]) -> str:
+    """One file per line: name first, location second."""
+    return "\n".join(f"{p.name}  ·  {_short_dir(p.parent)}" for p in paths)
 
 
 def _human(path: Path) -> str:
@@ -141,9 +165,8 @@ def find(query: str, max_results: int = 5) -> str:
     results = search(query, max_results)
     if not results:
         return f"No files found matching '{query}'"
-    listed = ", ".join(f"{p.name} ({_human(p.parent)})" for p in results)
     noun = "file" if len(results) == 1 else "files"
-    return f"Found {len(results)} {noun}: {listed}"
+    return f"Found {len(results)} {noun}:\n{_format(results)}"
 
 
 def _mdfind_modified_since(days: int) -> list[Path]:
@@ -188,6 +211,5 @@ def recent(days: int, max_results: int = 5) -> str:
     window = _window_label(days)
     if not results:
         return f"No files worked on in the {window}"
-    listed = ", ".join(f"{p.name} ({_human(p.parent)})" for p in results)
     noun = "file" if len(results) == 1 else "files"
-    return f"{len(results)} {noun} from the {window}: {listed}"
+    return f"{len(results)} {noun} from the {window}:\n{_format(results)}"

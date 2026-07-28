@@ -470,7 +470,10 @@ def build_handlers(config: dict, memory=None) -> dict[str, Handler]:
         return capture.describe()
 
     def files_handler(message: str) -> str:
-        max_results = config.get("files", {}).get("max_results", 5)
+        # 4, not 5: the reply lands in a fixed-height slot on the orb surface,
+        # and a fifth line clipped. Four hits is plenty to recognise the one
+        # you meant, which is what a file search is actually for.
+        max_results = config.get("files", {}).get("max_results", 4)
         # a recency phrase ("last week", "recent files") → time search; the
         # window wins over any name, so "files I worked on last week" isn't a
         # literal name search for "worked on last week"
