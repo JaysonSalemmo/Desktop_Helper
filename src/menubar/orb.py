@@ -55,6 +55,7 @@ from AppKit import (
     NSTextView,
     NSView,
     NSVisualEffectView,
+    NSWindowStyleMaskBorderless,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskFullSizeContentView,
     NSWindowStyleMaskMiniaturizable,
@@ -91,16 +92,24 @@ from src.menubar.panel import _ChatInput, _Submitter, install_edit_menu
 # from the window — and that independent easing read as the circle twitching
 # when it should have been perfectly still. Same box parked and docked means
 # there is nothing left to animate.
-ORB_BOX = 176                   # parked window: orb + room for the ring
+ORB_DRAW = 176                  # the orb's DRAWN size (radii derive from this)
+ORB_PAD = 46                    # transparent margin around it. The window clips
+                                # a RADIAL glow at its RECTANGULAR bounds — full
+                                # at the corners, cut at the edges — which drew
+                                # the obvious blue square. Padding gives the glow
+                                # and the fully-extended bars room to fade out.
+ORB_BOX = ORB_DRAW + 2 * ORB_PAD  # the orb window
 OPEN_W, OPEN_H = 460, 460       # bloomed conversation surface
-ORB_SMALL = 176                 # docked at exactly the same size
 MARGIN = 18
 TRAFFIC_CLEARANCE = 76   # standard buttons sit at x=7/27/47
-INPUT_H = 32
+INPUT_H = 32             # one line tall…
+INPUT_MAX_H = 84         # …grows to here as you type, then scrolls. Capped so
+                         # the pill can't climb into the message slot above it.
+INPUT_GAP = 22           # breathing room kept between the pill and the message
 TEXT_BOTTOM = 100        # the message is anchored HERE and grows upward —
                          # lifted off the ask box so the exchange sits in the
                          # open space under the orb rather than crowding it
-TEXT_MAX_H = 140         # …no further: beyond this it clips instead of
+TEXT_MAX_H = 152         # …no further: beyond this it clips instead of
                          # spilling over the ask box (the briefing did exactly
                          # that — long text ignored the frame entirely). Capped
                          # so a long reply still clears the orb's bars.
@@ -127,10 +136,13 @@ IDLE_REACH = 0.34        # how far the spokes reach with NO audio — idle waves
                          # stay small, and speech is what extends them
 STATE_FADE_S = 0.45      # core easing between its fixed per-state sizes
 PROGRESS_SPAN = 0.22     # how much of the loading ring the sweeping bar covers
+ARC_CLEARANCE = 2.5      # px between the core's edge and the loading arc. The
+                         # arc deliberately hugs the CIRCLE rather than sitting
+                         # centred in the gap: the bars' inner ends form a hard
+                         # visual edge while the disc's is soft, so a
+                         # geometrically centred arc reads as crowding the bars.
 PROGRESS_PERIOD = 1.15   # seconds per lap
 SWEEP_FADE_S = 0.45      # loading arc dissolves into the live orb
-DOCKED_Y = OPEN_H - MARGIN - ORB_SMALL / 2 - ORB_BOX / 2  # orb y when open
-DOCK_SCALE = ORB_SMALL / ORB_BOX  # how far the orb shrinks when docked
 
 # per-state: (core scale, ring spin period s, bar opacity, color fn)
 _STATES = {
@@ -157,8 +169,9 @@ class OrbView:
     Main thread only. `.view` is the NSView to place in a superview.
     """
 
-    def __init__(self, box: float):
-        self.view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, box, box))
+    def __init__(self, box: float, pad: float = 0.0):
+        span = box + 2 * pad
+        self.view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, span, span))
         self.view.setWantsLayer_(True)
         # A view-BACKED layer has anchorPoint (0,0) — the bottom-left corner —
         # so scaling it grew the orb up and to the right instead of outward from
@@ -166,18 +179,18 @@ class OrbView:
         # DOCK_SCALE 1.33). Everything lives in this container sublayer instead:
         # layers we create ourselves default to a centred anchorPoint.
         self._group = CALayer.layer()
-        self._group.setFrame_(NSMakeRect(0, 0, box, box))
+        self._group.setFrame_(NSMakeRect(0, 0, span, span))
         self.view.layer().addSublayer_(self._group)
         self._box = box
+        self._span = span
         self._state = "dormant"
         self._level = 0.0
         self._bands = None          # smoothed per-bar heights, 0..1
         self._suspended = False
-        self._scale = 1.0
 
-        c = box / 2.0
+        c = span / 2.0
         self._r0 = box * 0.22                   # core radius
-        self._bar_in = self._r0 * 1.34          # leaves a gap for the loading arc
+        self._bar_in = self._r0 * 1.28          # leaves a gap for the loading arc
         self._bar_len = box * 0.27              # …and reach this much further
         unit = CGRectMake(c - self._r0, c - self._r0, self._r0 * 2, self._r0 * 2)
 
@@ -203,13 +216,16 @@ class OrbView:
 
         # the loading sweep: a bar travelling around the core while the model
         # loads. Hidden in every other state.
-        r_prog = self._r0 * 1.15   # in the gap between core and bars
+        # anchored to the CORE's edge (not a fraction of the gap), so it keeps
+        # the same visual relationship to the circle however the radii change
+        arc_w = max(2.0, box * 0.017)
+        r_prog = self._r0 + ARC_CLEARANCE + arc_w / 2.0
         self._progress = CAShapeLayer.layer()
         self._progress.setFrame_(self.view.bounds())
         self._progress.setPath_(CGPathCreateWithEllipseInRect(
             CGRectMake(c - r_prog, c - r_prog, r_prog * 2, r_prog * 2), None))
         self._progress.setFillColor_(None)
-        self._progress.setLineWidth_(max(2.0, box * 0.020))
+        self._progress.setLineWidth_(arc_w)
         self._progress.setLineCap_("round")
         self._progress.setStrokeStart_(0.0)
         self._progress.setStrokeEnd_(PROGRESS_SPAN)
@@ -234,7 +250,7 @@ class OrbView:
         term the ring would change pattern while staying the same size.
         """
         path = CGPathCreateMutable()
-        c = self._box / 2.0
+        c = self._span / 2.0
         reach = IDLE_REACH + (1.0 - IDLE_REACH) * self._level
         for i, h in enumerate(heights):
             angle = 2.0 * math.pi * i / BARS
@@ -303,22 +319,6 @@ class OrbView:
         self._suspended = False
         self._apply_state()
 
-    def set_scale(self, scale: float, duration: float = 0.0) -> None:
-        """Shrink/grow the WHOLE orb as one unit — core, bars and glow together.
-        Geometry is fixed at full size and scaled by the view's layer, so
-        docking is one smooth transform rather than a re-layout that snaps."""
-        layer = self._group
-        if duration > 0:
-            anim = CABasicAnimation.animationWithKeyPath_("transform.scale")
-            anim.setFromValue_(self._scale)
-            anim.setToValue_(scale)
-            anim.setDuration_(duration)
-            anim.setTimingFunction_(
-                CAMediaTimingFunction.functionWithName_(kCAMediaTimingFunctionEaseInEaseOut))
-            layer.addAnimation_forKey_(anim, "dock")
-        layer.setTransform_(CATransform3DMakeScale(scale, scale, 1.0))
-        self._scale = scale
-
     # -- internals ---------------------------------------------------------
 
     def _apply_state(self) -> None:
@@ -386,7 +386,12 @@ class OrbView:
         CATransaction.begin()
         CATransaction.setAnimationDuration_(STATE_FADE_S)
         self._core.setAffineTransform_(CGAffineTransformMakeScale(base, base))
-        self._core.setShadowOpacity_(0.35 if self._state == "dormant" else 0.7)
+        # loading is a RESTING state, not an active one. At 0.7 the core's glow
+        # (28px radius) bled out past the bars and swallowed the loading arc, so
+        # the circle read as far larger than it is and the arc looked pinned to
+        # its edge — which is what Kai was seeing, not a radius problem.
+        resting = self._state in ("dormant", "loading")
+        self._core.setShadowOpacity_(0.35 if resting else 0.7)
         self._core.setShadowRadius_(self._box * 0.16)
         CATransaction.commit()
 
@@ -425,28 +430,26 @@ class OrbView:
 
 
 class _OrbDelegate(NSObject):
-    """Red button = fold back to the orb. The orb is the app's presence; closing
-    the conversation must not take it off the desktop."""
+    """Surface-window delegate. The red button folds back to the orb (the
+    presence never leaves the desktop); miniaturise detaches the child-window
+    link first, because a child window cannot go to the Dock while attached."""
 
-    def initWithCollapse_relayout_(self, collapse, relayout):
+    def initWithOwner_(self, owner):
         self = objc.super(_OrbDelegate, self).init()
         if self is None:
             return None
-        self._collapse = collapse
-        self._relayout = relayout
+        self._owner = owner
         return self
 
     def windowShouldClose_(self, sender):
-        self._collapse()
+        self._owner.collapse()
         return False
 
-    def windowDidResize_(self, notification):
-        self._relayout()
+    def windowWillMiniaturize_(self, notification):
+        self._owner._detach_surface()
 
     def windowDidDeminiaturize_(self, notification):
-        # restoring from the Dock can hand back a different content size than
-        # we laid out for; re-place everything rather than trusting the frame
-        self._relayout()
+        self._owner._reattach_surface()
 
 
 class _OrbPanel(NSPanel):
@@ -501,10 +504,16 @@ class _OrbHitView(NSView):
             return None
         self._on_click = on_click
         self._on_drag = on_drag
+        self._draggable = True
         self._down = None
         self._moved = 0.0
         self._radius = frame.size.width / 2.0
         return self
+
+    def setDraggable_(self, draggable):
+        """Open, the surface's titlebar is the drag handle and the orb rides
+        along as its child; dragging the orb itself would separate them."""
+        self._draggable = bool(draggable)
 
     def setHitRadius_(self, radius):
         self._radius = float(radius)
@@ -527,7 +536,7 @@ class _OrbHitView(NSView):
         self._moved = 0.0
 
     def mouseDragged_(self, event):
-        if self._down is None:
+        if self._down is None or not self._draggable:
             return
         win = self.window()
         where = event.locationInWindow()
@@ -558,40 +567,61 @@ class OrbWindow:
         self._pending_question = None
         self._index = 0          # 0 = newest; scrolling up walks backwards
         self._open = False
-        self._animating = False
-        self._anchor = None   # the orb's screen point, held across fast toggles
-        self._bloom = 0       # generation counter: stale completions must not fire
+        self._fade = 0           # generation counter: stale fade completions bail
 
-        # TITLED (not borderless): Kai wants the real stoplight buttons, and
-        # miniaturize only exists on a titled window. The titlebar is
-        # transparent with FullSizeContentView, so the surface still looks
-        # frameless — and the buttons are HIDDEN while collapsed, where a naked
-        # orb should have no chrome at all.
+        # TWO WINDOWS, NEITHER EVER RESIZES — the decisive fix for the bloom
+        # saga. Five successive bugs (snap, drift, bounce, twitch, jitter) all
+        # came from resizing one window while trying to hold the orb visually
+        # still inside it. This architecture deletes the problem:
+        #   orb_panel — a small borderless transparent window holding ONLY the
+        #               orb. Constant size; moves only when the user drags it.
+        #   panel     — the conversation surface: titled (real stoplights,
+        #               miniaturise works), FIXED at OPEN_W x OPEN_H, shown by
+        #               fading in as a child window BELOW the orb and hidden by
+        #               fading out. Opening carries no geometry change at all.
+        # Side benefit: parked is now a borderless window drawing nothing but
+        # the orb's layers, so the titled window's faint "boundary box"
+        # artifact (backlog item 15) has nothing left to paint it.
+        self.orb_panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, ORB_BOX, ORB_BOX),
+            NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel,
+            NSBackingStoreBuffered, False)
+        self.orb_panel.setOpaque_(False)
+        self.orb_panel.setBackgroundColor_(NSColor.clearColor())
+        self.orb_panel.setLevel_(3)  # NSFloatingWindowLevel
+        self.orb_panel.setHidesOnDeactivate_(False)
+        self.orb_panel.setReleasedWhenClosed_(False)
+        self.orb_panel.setHasShadow_(False)  # the orb's glow is its shadow
+        self.orb_panel.contentView().setWantsLayer_(True)
+
+        self._orb = OrbView(ORB_DRAW, ORB_PAD)
+        self._hit = _OrbHitView.alloc().initWithFrame_onClick_onDrag_(
+            NSMakeRect(0, 0, ORB_BOX, ORB_BOX), self._orb_clicked, None)
+        self._hit.addSubview_(self._orb.view)
+        self.orb_panel.contentView().addSubview_(self._hit)
+
         mask = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                 | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskNonactivatingPanel
                 | NSWindowStyleMaskFullSizeContentView)
         self.panel = _OrbPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, ORB_BOX, ORB_BOX), mask, NSBackingStoreBuffered, False)
+            NSMakeRect(0, 0, OPEN_W, OPEN_H), mask, NSBackingStoreBuffered, False)
         self.panel.setTitlebarAppearsTransparent_(True)
-        self.panel.setTitleVisibility_(1)  # hidden — the header carries the name
+        self.panel.setTitleVisibility_(1)  # hidden — the orb carries the identity
         self.panel.setOpaque_(False)
         self.panel.setBackgroundColor_(NSColor.clearColor())
-        self.panel.setLevel_(3)  # NSFloatingWindowLevel
+        self.panel.setLevel_(3)
         self.panel.setHidesOnDeactivate_(False)
         self.panel.setReleasedWhenClosed_(False)
         self.panel.setBecomesKeyOnlyIfNeeded_(False)
         self.panel.setMovableByWindowBackground_(False)
         self.panel._on_cancel = self.collapse
-        self.panel.setHasShadow_(False)  # the orb's glow is its shadow
-        self._delegate = _OrbDelegate.alloc().initWithCollapse_relayout_(
-            self.collapse, self.relayout)
+        self._delegate = _OrbDelegate.alloc().initWithOwner_(self)
         self.panel.setDelegate_(self._delegate)
-        self._chrome_buttons_visible(False)
 
         content = self.panel.contentView()
         content.setWantsLayer_(True)
 
-        # -- the conversation chrome (hidden while collapsed) ---------------
+        # -- the conversation chrome (the surface window IS the chrome) ------
         self._chrome = NSVisualEffectView.alloc().initWithFrame_(
             NSMakeRect(0, 0, OPEN_W, OPEN_H))
         self._chrome.setWantsLayer_(True)
@@ -600,7 +630,6 @@ class OrbWindow:
         self._chrome.setBlendingMode_(0)      # behind-window: real translucency
         self._chrome.setMaterial_(15)         # NSVisualEffectMaterialHUDWindow
         self._chrome.setState_(1)             # active
-        self._chrome.setAlphaValue_(0.0)
         content.addSubview_(self._chrome)
 
         self._submitter = _Submitter.alloc().initWithCallback_(self._submit)
@@ -635,11 +664,20 @@ class OrbWindow:
 
         # the input fills the pill and centres its text both ways — the old
         # frame was inset by an eyeballed 6/8px and read as off-centre
+        input_w = OPEN_W - 2 * MARGIN
+        self._input_h = INPUT_H
+        self._input_scroll = NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(MARGIN, MARGIN, input_w, INPUT_H))
+        self._input_scroll.setHasVerticalScroller_(False)  # only past the cap
+        self._input_scroll.setBorderType_(0)
+        self._input_scroll.setDrawsBackground_(False)
+        self._input_scroll.contentView().setDrawsBackground_(False)
         self._input = _ChatInput.alloc().initWithFrame_submit_placeholder_onChange_(
-            NSMakeRect(MARGIN, MARGIN, OPEN_W - 2 * MARGIN, INPUT_H),
-            self._submit, "Ask anything…", None)
+            NSMakeRect(0, 0, input_w, INPUT_H),
+            self._submit, "Ask anything…", self._grow_input)
         self._input.setFont_(NSFont.systemFontOfSize_(13))
         self._input.setDrawsBackground_(False)
+        self._input.setRichText_(False)
         self._input.setAlignment_(NSTextAlignmentCenter)  # like everything else here
         # measured, not eyeballed: a hardcoded line height left the caret and
         # text sitting slightly high in the pill
@@ -648,126 +686,19 @@ class OrbWindow:
         self._input.setTextContainerInset_((14, max(0.0, (INPUT_H - _line_h) / 2)))
         self._input._center_placeholder = True
         box = NSView.alloc().initWithFrame_(
-            NSMakeRect(MARGIN, MARGIN, OPEN_W - 2 * MARGIN, INPUT_H))
+            NSMakeRect(MARGIN, MARGIN, input_w, INPUT_H))
         box.setWantsLayer_(True)
         box.layer().setCornerRadius_(INPUT_H / 2)
+        box.layer().setMasksToBounds_(True)
         box.layer().setBorderWidth_(1)
         box.layer().setBorderColor_(NSColor.separatorColor().CGColor())
         self._chrome.addSubview_(box)
         self._input_box = box
-        self._chrome.addSubview_(self._input)
-
-        # -- the orb itself, on top of everything ---------------------------
-        self._orb = OrbView(ORB_BOX)
-        self._hit = _OrbHitView.alloc().initWithFrame_onClick_onDrag_(
-            NSMakeRect(0, 0, ORB_BOX, ORB_BOX), self._orb_clicked, self._orb_dragged)
-        self._hit.addSubview_(self._orb.view)
-        content.addSubview_(self._hit)
+        self._input_scroll.setDocumentView_(self._input)
+        self._chrome.addSubview_(self._input_scroll)
 
         self._park_default()
         self._render()
-
-    def relayout(self) -> None:
-        """Re-place everything for the window's CURRENT size (resize, restore)."""
-        # The resize stream is what moves the orb, and it must NOT be
-        # suppressed during the bloom. Animating the orb's frame alongside the
-        # window was tried and put the snap back: `animator().setFrame_()`
-        # applies this view's frame immediately instead of interpolating it, so
-        # the orb jumped to its destination while the window was still the old
-        # size. Tracking the real size a frame behind beats being wrong outright.
-        bounds = self.panel.contentView().bounds()
-        self._place(bounds.size.width, bounds.size.height)
-
-    def _settle(self, token=None) -> None:
-        """End-of-bloom cleanup, ignored if a newer transition has started.
-
-        Without the token the FIRST animation's completion fires midway through
-        the second, clearing `_animating` and letting relayout stamp on an
-        in-flight bloom — the erratic twitching when the orb is spammed."""
-        if token is not None and token != self._bloom:
-            return
-        self._animating = False
-        self._anchor = None
-        self.relayout()
-
-    def _orb_frame(self, width: float, height: float):
-        """Where the orb sits inside a window of this size — CONTINUOUS in size,
-        with no branch on open/collapsed.
-
-        This is what fixed the brief snap. The two states want different
-        in-window positions (155,279 open vs 0,0 collapsed), so a state flag
-        made the position *discontinuous*: for the instant after the flag
-        flipped but before the window had resized, the orb drew a full
-        155x279 away — southwest when collapsing, northeast when expanding,
-        exactly as Kai described. Blending on the window's actual height
-        removes the discontinuity, so there is no jump to see at any point.
-        """
-        docked = height - MARGIN - ORB_SMALL / 2 - ORB_BOX / 2  # pinned up top
-        if height >= OPEN_H:
-            y = docked                    # larger window (zoom): stay up top
-        else:
-            # Between parked and open, y must be LINEAR in height. The window's
-            # origin also moves linearly as it resizes, and the two cancel only
-            # if this side is linear too — an earlier blend of `docked` (itself
-            # height-dependent) made y quadratic, so the terms didn't cancel and
-            # the orb swung ~39px out and back: the "bouncing like a ball".
-            t = max(0.0, (height - ORB_BOX) / max(1.0, OPEN_H - ORB_BOX))
-            y = t * DOCKED_Y
-        return NSMakeRect(width / 2 - ORB_BOX / 2, y, ORB_BOX, ORB_BOX)
-
-    def _place(self, width: float, height: float, move_orb: bool = True) -> None:
-        """Lay the surface out for an EXPLICIT size.
-
-        Callers that are starting a resize animation pass the TARGET size
-        rather than the live bounds: mid-animation the window still reports its
-        old size, so laying out from `contentView().bounds()` at that moment
-        pinned the orb to the collapsed geometry and left it off-centre once the
-        window finished growing (Kai's before/after, twice). Resize and restore
-        notifications still call relayout() with the live size, which corrects
-        any path that doesn't go through an animation."""
-        if width < 2 or height < 2:
-            return
-        CATransaction.begin()
-        # a layer-backed view eases frame changes by default; for a direct
-        # re-place we want it exactly where we put it, immediately
-        CATransaction.setDisableActions_(True)
-        if move_orb:
-            self._hit.setFrame_(self._orb_frame(width, height))
-        if not self._open:
-            CATransaction.commit()
-            return
-
-        self._chrome.setFrame_(NSMakeRect(0, 0, width, height))
-        text_x = MARGIN + 16
-        text_w = max(40.0, width - 2 * text_x)
-        self._transcript.setFrame_(NSMakeRect(
-            text_x, TEXT_BOTTOM, text_w, self._transcript.frame().size.height))
-        self._marker.setFrame_(NSMakeRect(text_x, TEXT_BOTTOM - 22, text_w, 14))
-        input_w = max(40.0, width - 2 * MARGIN)
-        self._input_box.setFrame_(NSMakeRect(MARGIN, MARGIN, input_w, INPUT_H))
-        self._input.setFrame_(NSMakeRect(MARGIN, MARGIN, input_w, INPUT_H))
-        self._layout_text()
-        CATransaction.commit()
-
-    def _chrome_buttons_visible(self, visible: bool) -> None:
-        """Stoplights belong to the conversation surface, not the bare orb."""
-        for index in (0, 1, 2):  # close, miniaturize, zoom
-            button = self.panel.standardWindowButton_(index)
-            if button is not None:
-                button.setHidden_(not visible)
-
-    def _chrome_button(self, glyph: str, ident: str, x: float):
-        btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(x, OPEN_H - MARGIN - ORB_SMALL + 4, 26, 24))
-        btn.setTitle_(glyph)
-        btn.setIdentifier_(ident)
-        btn.setBezelStyle_(1)
-        btn.setBordered_(False)
-        btn.setFont_(NSFont.systemFontOfSize_(13))
-        btn.setTarget_(self._submitter)
-        btn.setAction_("header:")
-        self._chrome.addSubview_(btn)
-        return btn
 
     # -- placement ---------------------------------------------------------
 
@@ -775,7 +706,7 @@ class OrbWindow:
         screen = NSScreen.mainScreen().visibleFrame()
         x = screen.origin.x + screen.size.width - ORB_BOX - EDGE_GAP
         y = screen.origin.y + EDGE_GAP
-        self.panel.setFrame_display_(NSMakeRect(x, y, ORB_BOX, ORB_BOX), False)
+        self.orb_panel.setFrame_display_(NSMakeRect(x, y, ORB_BOX, ORB_BOX), False)
 
     def _clamp(self, x: float, y: float, w: float, h: float):
         screen = NSScreen.mainScreen().visibleFrame()
@@ -785,91 +716,105 @@ class OrbWindow:
                 min(y, screen.origin.y + screen.size.height - h - 8))
         return NSMakeRect(x, y, w, h)
 
-    def _anchor_point(self):
-        """The screen point the orb should hold through a transition.
+    def _surface_origin(self):
+        """Surface frame that puts the orb at its docked spot (top centre),
+        clamped to the screen."""
+        f = self.orb_panel.frame()
+        cx = f.origin.x + ORB_BOX / 2
+        cy = f.origin.y + ORB_BOX / 2
+        return self._clamp(cx - OPEN_W / 2,
+                           cy - (OPEN_H - MARGIN - ORB_DRAW / 2), OPEN_W, OPEN_H)
 
-        Recomputing this per click is what made spamming the orb wander: a
-        second click lands mid-animation, when the window is halfway between
-        sizes, so `_orb_center()` reads geometry that matches neither state and
-        the error compounds with every toggle. Computed once from a settled
-        window and reused until things come to rest."""
-        if self._animating and self._anchor is not None:
-            return self._anchor
-        self._anchor = self._orb_center()
-        return self._anchor
-
-    def _orb_center(self):
-        f = self.panel.frame()
-        if self._open:
-            return (f.origin.x + OPEN_W / 2,
-                    f.origin.y + OPEN_H - MARGIN - ORB_SMALL / 2)
-        return (f.origin.x + ORB_BOX / 2, f.origin.y + ORB_BOX / 2)
-
-    # -- bloom / collapse --------------------------------------------------
-
-    def _orb_dragged(self) -> None:
-        """The orb was moved: any cached screen anchor is stale."""
-        self._anchor = None
+    # -- bloom / collapse ---------------------------------------------------
 
     def _orb_clicked(self) -> None:
+        if self.panel.isMiniaturized():
+            self.panel.deminiaturize_(None)
+            return
         self.collapse() if self._open else self.expand()
 
     def expand(self) -> None:
-        """Bloom open. The orb keeps its place on screen as far as the screen
-        edges allow, and the surface unfurls around it."""
+        """Fade the surface in beneath the orb.
+
+        NOTHING moves or resizes: the orb window is untouched and the surface
+        appears at full size around it, its origin chosen so the orb sits at
+        the docked spot. Near a screen edge the clamp can shift the surface —
+        then the ORB is nudged onto its docked spot first, a pure window move
+        and the only geometry change this design ever makes."""
         self._present_window()
         if self._open:
             return
-        cx, cy = self._anchor_point()  # measure BEFORE flipping the state flag
         self._open = True
-        self._chrome_buttons_visible(True)
+        self._fade += 1
         if self._on_visibility is not None:
             self._on_visibility(True)
-        target = self._clamp(cx - OPEN_W / 2,
-                             cy - OPEN_H + MARGIN + ORB_SMALL / 2, OPEN_W, OPEN_H)
-        # The window target is chosen so the orb's SCREEN position is identical
-        # before and after. Animating the window origin and the orb's frame
-        # together, with one timing curve, therefore holds the orb visually
-        # still through the whole bloom — smooth by construction rather than by
-        # tuning. (Snapping the orb to its new frame first, as this used to,
-        # made it jump and then crawl back as resize notifications arrived.)
-        self._animating = True
-        self._bloom += 1
-        token = self._bloom
-        self._place(OPEN_W, OPEN_H, move_orb=False)
+
+        target = self._surface_origin()
+        # centre the orb WINDOW on the docked point; the docked point itself is
+        # a function of the DRAWN size, since the padding is invisible
+        ox = target.origin.x + OPEN_W / 2 - ORB_BOX / 2
+        oy = target.origin.y + (OPEN_H - MARGIN - ORB_DRAW / 2) - ORB_BOX / 2
+        of = self.orb_panel.frame()
+        if abs(of.origin.x - ox) > 0.5 or abs(of.origin.y - oy) > 0.5:
+            self.orb_panel.setFrameOrigin_(NSPoint(ox, oy))
+
+        self.panel.setFrameOrigin_(NSPoint(target.origin.x, target.origin.y))
+        # The SURFACE is the parent and the orb its child (NSWindowAbove), not
+        # the other way round: child windows follow their parent, so dragging
+        # the surface's titlebar now carries the orb with it. With the link
+        # reversed, dragging the surface left the orb stranded — Kai ended up
+        # with the two halves in different places.
+        if self.orb_panel.parentWindow() is None:
+            self.panel.addChildWindow_ordered_(self.orb_panel, 1)
+        self._hit.setDraggable_(False)  # while open, the titlebar is the handle
+        self.panel.orderFrontRegardless()
         NSAnimationContext.beginGrouping()
         NSAnimationContext.currentContext().setDuration_(BLOOM_S)
-        NSAnimationContext.currentContext().setCompletionHandler_(
-            lambda: self._settle(token))
-        self.panel.animator().setFrame_display_(target, True)
-        self._chrome.animator().setAlphaValue_(1.0)
+        self.panel.animator().setAlphaValue_(1.0)
         NSAnimationContext.endGrouping()
-        self._hit.setHitRadius_(ORB_BOX / 2 * DOCK_SCALE)
         self._render()
         self.panel.makeFirstResponder_(self._input)
 
     def collapse(self) -> None:
-        """Fold back to the orb, leaving it where the surface's orb sat."""
+        """Fade the surface out. The orb's window is not touched — there is
+        nothing left that can snap, drift, bounce or jitter."""
         if not self._open:
             return
-        cx, cy = self._anchor_point()  # measure BEFORE flipping the state flag
         self._open = False
-        self._chrome_buttons_visible(False)
+        self._fade += 1
+        token = self._fade
         if self._on_visibility is not None:
             self._on_visibility(False)
-        target = self._clamp(cx - ORB_BOX / 2, cy - ORB_BOX / 2, ORB_BOX, ORB_BOX)
-
-        self._animating = True
-        self._bloom += 1
-        token = self._bloom
         NSAnimationContext.beginGrouping()
         NSAnimationContext.currentContext().setDuration_(BLOOM_S)
         NSAnimationContext.currentContext().setCompletionHandler_(
-            lambda: self._settle(token))
-        self._chrome.animator().setAlphaValue_(0.0)
-        self.panel.animator().setFrame_display_(target, True)
+            lambda: self._finish_collapse(token))
+        self.panel.animator().setAlphaValue_(0.0)
         NSAnimationContext.endGrouping()
-        self._hit.setHitRadius_(ORB_BOX / 2)
+
+    def _finish_collapse(self, token: int) -> None:
+        """Take the faded surface off screen — unless a newer fade owns it (a
+        re-expand during the fade-out must not have its window yanked away)."""
+        if token != self._fade:
+            return
+        self.panel.removeChildWindow_(self.orb_panel)
+        self.panel.orderOut_(None)
+        self._hit.setDraggable_(True)  # parked again: the orb is the handle
+        self.orb_panel.orderFrontRegardless()
+
+    # -- miniaturise plumbing (surface delegate) ----------------------------
+
+    def _detach_surface(self) -> None:
+        """Miniaturising a parent drags its children to the Dock too, so the orb
+        is unhitched first and hidden alongside the surface."""
+        self.panel.removeChildWindow_(self.orb_panel)
+        self.orb_panel.orderOut_(None)
+
+    def _reattach_surface(self) -> None:
+        self.panel.setAlphaValue_(1.0)
+        self.orb_panel.orderFrontRegardless()
+        if self.orb_panel.parentWindow() is None:
+            self.panel.addChildWindow_ordered_(self.orb_panel, 1)
 
     # -- transcript --------------------------------------------------------
 
@@ -886,9 +831,10 @@ class OrbWindow:
         container = view.textContainer()
         layout.ensureLayoutForTextContainer_(container)
         used = layout.usedRectForTextContainer_(container).size.height
-        height = max(1.0, min(used, TEXT_MAX_H))
+        bottom = max(TEXT_BOTTOM, MARGIN + self._input_h + INPUT_GAP)
+        height = max(1.0, min(used, TEXT_TOP - bottom))
         frame = view.frame()
-        view.setFrame_(NSMakeRect(frame.origin.x, TEXT_BOTTOM,
+        view.setFrame_(NSMakeRect(frame.origin.x, bottom,
                                   frame.size.width, height))
 
     def _set_body(self, body) -> None:
@@ -978,7 +924,7 @@ class OrbWindow:
     # -- ReplyPanel-compatible API ----------------------------------------
 
     def _present_window(self) -> None:
-        self.panel.orderFrontRegardless()
+        self.orb_panel.orderFrontRegardless()
         self._orb.resume()
 
     def park(self) -> None:
@@ -1034,11 +980,48 @@ class OrbWindow:
 
     # -- input -------------------------------------------------------------
 
+    def _grow_input(self) -> None:
+        """Grow the ask box with the text, iMessage-style, then scroll.
+
+        Typing past one line used to spill straight over the pill's border.
+        The pill grows UPWARD from its fixed bottom edge, and the message slot
+        above yields the same amount so the two never collide — beyond
+        INPUT_MAX_H the text scrolls inside instead."""
+        inset = self._input.textContainerInset().height
+        needed = self._input.content_height() + 2 * inset
+        height = max(INPUT_H, min(INPUT_MAX_H, needed))
+        if abs(height - self._input_h) < 0.5:
+            return
+        self._input_h = height
+        self._input_scroll.setHasVerticalScroller_(needed > INPUT_MAX_H)
+        self._relayout_input()
+
+    def _relayout_input(self) -> None:
+        width = self._chrome.frame().size.width or OPEN_W
+        input_w = max(40.0, width - 2 * MARGIN)
+        height = self._input_h
+        self._input_box.setFrame_(NSMakeRect(MARGIN, MARGIN, input_w, height))
+        # capsule while it's one line; a softer radius once it's a block of text
+        self._input_box.layer().setCornerRadius_(min(INPUT_H, height) / 2)
+        self._input_scroll.setFrame_(NSMakeRect(MARGIN, MARGIN, input_w, height))
+        self._input.setFrame_(NSMakeRect(0, 0, input_w, max(height, 1)))
+
+        # the message slot gives up exactly what the pill takes, so a long
+        # question can never push text under the ask box
+        bottom = max(TEXT_BOTTOM, MARGIN + height + INPUT_GAP)
+        text_x = MARGIN + 16
+        text_w = max(40.0, width - 2 * text_x)
+        self._marker.setFrame_(NSMakeRect(text_x, bottom - 22, text_w, 14))
+        self._transcript.setFrame_(NSMakeRect(
+            text_x, bottom, text_w, self._transcript.frame().size.height))
+        self._layout_text()
+
     def _submit(self) -> None:
         text = str(self._input.string()).strip()
         if not text:
             return
         self._input.setString_("")
+        self._grow_input()   # shrink back to one line
         self._on_followup(text)
 
 

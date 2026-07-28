@@ -5,7 +5,14 @@ import pytest
 
 pytest.importorskip("Quartz", reason="macOS/PyObjC only")
 
-from src.menubar.orb import DOCK_SCALE, ORB_BOX, OrbView, OrbWindow  # noqa: E402
+from src.menubar.orb import ORB_BOX, ORB_DRAW, ORB_PAD, OrbView, OrbWindow  # noqa: E402
+
+
+def _open_fully(window):
+    """Expand — in the two-window architecture nothing resizes, so there is no
+    animation to stand in for: expand() positions and shows the surface at its
+    final size immediately (only its alpha fades, which tests don't rely on)."""
+    window.expand()
 
 
 def _keys(layer):
@@ -14,28 +21,12 @@ def _keys(layer):
 
 @pytest.fixture
 def orb():
-    return OrbView(ORB_BOX)
+    return OrbView(ORB_DRAW, ORB_PAD)
 
 
 @pytest.fixture
 def window():
     return OrbWindow(on_followup=lambda text: None)
-
-
-def _open_fully(window):
-    """Expand and stand in for the animation completing.
-
-    `animator().setFrame_()` needs a run loop, so headlessly neither the window
-    nor the orb actually moves. Forcing the final window size and calling
-    `_settle()` reproduces exactly what the completion handler does in the app,
-    which keeps these assertions about the SETTLED layout honest."""
-    from src.menubar.orb import OPEN_H, OPEN_W
-
-    window.expand()
-    frame = window.panel.frame()
-    window.panel.setFrame_display_(
-        window._clamp(frame.origin.x, frame.origin.y, OPEN_W, OPEN_H), False)
-    window._settle()
 
 
 def test_dormant_visibly_moves(orb):
@@ -139,19 +130,6 @@ def test_bad_input_ignored(orb):
     assert 0.0 <= orb._level <= 1.0
 
 
-def test_docking_scales_orb_and_its_hit_target(window):
-    # the box never resizes (so the layer can scale smoothly) — the CLICK area
-    # has to shrink with it, or the docked orb swallows transcript clicks
-    assert window._orb._scale == 1.0
-    assert window._hit._radius == ORB_BOX / 2
-    window.expand()
-    assert window._orb._scale == pytest.approx(DOCK_SCALE)
-    assert window._hit._radius == pytest.approx(ORB_BOX / 2 * DOCK_SCALE)
-    window.collapse()
-    assert window._orb._scale == 1.0
-    assert window._hit._radius == ORB_BOX / 2
-
-
 def test_parking_does_not_claim_to_be_open(window):
     # a parked orb leaves "Show Chat" live — expanding is what that item does
     seen = []
@@ -228,20 +206,6 @@ def test_clear_empties_the_conversation(window):
     assert str(window._transcript.string()).strip() == ""
 
 
-def test_stoplights_belong_to_the_surface_not_the_bare_orb(window):
-    # Kai: "I still want the stoplight buttons" — but a parked orb should have
-    # no chrome, so they appear only while the conversation surface is open
-    def hidden():
-        return [bool(window.panel.standardWindowButton_(i).isHidden())
-                for i in (0, 1, 2)]
-
-    assert hidden() == [True, True, True], "collapsed orb must show no chrome"
-    window.expand()
-    assert hidden() == [False, False, False], "open surface needs close/min/zoom"
-    window.collapse()
-    assert hidden() == [True, True, True]
-
-
 def test_window_is_miniaturizable(window):
     # minimize only exists on a titled window — that's why it isn't borderless
     from AppKit import NSWindowStyleMaskMiniaturizable, NSWindowStyleMaskTitled
@@ -266,7 +230,7 @@ def test_level_response_is_snappy_and_wide():
 
     assert LEVEL_SMOOTHING <= 0.1, "slower than this and single words blur"
 
-    orb = OrbView(ORB_BOX)
+    orb = OrbView(ORB_DRAW, ORB_PAD)
     orb.set_state("speaking")
     # sustained levels, as real speech delivers — a single sample is only ever
     # part of the way there by design (that IS the envelope)
@@ -311,19 +275,6 @@ def test_ask_box_text_is_centred(window):
     assert window._input.frame().size.width == window._chrome.frame().size.width - 2 * 18
 
 
-def test_collapse_expand_cycle_does_not_drift(window):
-    # live bug: pressing the orb to collapse and reopening left it off-centre.
-    # _orb_center() branches on self._open, and both transitions flipped that
-    # flag BEFORE measuring — so each one measured the old window with the new
-    # formula and shifted the frame a little further every cycle.
-    window.expand()
-    first = tuple(window.panel.frame().origin)
-    for _ in range(3):
-        window.collapse()
-        window.expand()
-    assert tuple(window.panel.frame().origin) == first
-
-
 def test_replies_fade_in(window):
     # "fade in the response" — a new answer animates, it doesn't blink in
     window.show("hello", "Hey there — what do you need?")
@@ -360,20 +311,6 @@ def test_bars_settle_back_without_audio(orb):
     assert sum(orb._bands) / BARS < loud, "the ring relaxes when the voice stops"
 
 
-def test_layout_recentres_at_any_window_size(window):
-    # the live bug: minimise → reopen left the orb off-centre because layout was
-    # baked from constants instead of the window's actual size
-    from AppKit import NSMakeRect
-
-    from src.menubar.orb import ORB_BOX
-
-    _open_fully(window)
-    for width, height in ((460, 460), (600, 520), (380, 430)):
-        window.panel.setFrame_display_(NSMakeRect(100, 100, width, height), False)
-        window.relayout()
-        assert window._hit.frame().origin.x == pytest.approx(width / 2 - ORB_BOX / 2)
-
-
 def test_loading_state_sweeps_then_settles(orb):
     # "a bar moving around the circle until the model is fully loaded"
     orb.set_state("loading")
@@ -385,20 +322,6 @@ def test_loading_state_sweeps_then_settles(orb):
     # and the arc fades, hiding itself when the fade completes
     assert _keys(orb._progress) == [], "the lap stops immediately"
     assert orb._progress.opacity() == 0.0, "…and it fades away"
-
-
-def test_expand_places_the_orb_for_the_TARGET_size(window):
-    # the bug that survived two fixes: expand() laid out from the window's LIVE
-    # bounds, which mid-animation are still the collapsed size — so the orb was
-    # pinned to the small geometry and ended up off-centre once it grew
-    from src.menubar.orb import OPEN_W, ORB_BOX
-
-    _open_fully(window)
-    assert window._hit.frame().origin.x == pytest.approx(OPEN_W / 2 - ORB_BOX / 2)
-    for _ in range(3):
-        window.collapse()
-        _open_fully(window)
-        assert window._hit.frame().origin.x == pytest.approx(OPEN_W / 2 - ORB_BOX / 2)
 
 
 def test_scaling_grows_from_the_centre_not_a_corner(orb):
@@ -417,17 +340,6 @@ def test_scaling_grows_from_the_centre_not_a_corner(orb):
     assert tuple(orb._group.anchorPoint()) == (0.5, 0.5)
     for layer in (orb._bars, orb._core, orb._progress):
         assert layer.superlayer() is orb._group, "scaled together, from the centre"
-
-
-def test_orb_is_centred_on_the_same_axis_as_the_text(window):
-    # Kai: "center the circle with the center of the text"
-    _open_fully(window)
-    orb = window._hit.frame()
-    box = window._input_box.frame()
-    text = window._transcript.frame()
-    orb_cx = orb.origin.x + orb.size.width / 2
-    assert orb_cx == pytest.approx(box.origin.x + box.size.width / 2)
-    assert orb_cx == pytest.approx(text.origin.x + text.size.width / 2)
 
 
 def test_loading_arc_sits_between_the_core_and_the_bars(orb):
@@ -458,11 +370,11 @@ def test_idle_waves_are_small(orb):
 def test_message_sits_clear_of_both_the_orb_and_the_ask_box(window):
     # Kai asked for the exchange to move up — but the slot is capped, so a long
     # reply must still stop short of the orb's bars rather than running into them
-    from src.menubar.orb import (DOCK_SCALE, INPUT_H, MARGIN, OPEN_H, ORB_BOX,
-                                 ORB_SMALL, TEXT_BOTTOM, TEXT_TOP, OrbView)
+    from src.menubar.orb import (INPUT_H, MARGIN, OPEN_H, ORB_DRAW, ORB_PAD,
+                                 TEXT_BOTTOM, TEXT_TOP, OrbView)
 
-    orb_bottom = (OPEN_H - MARGIN - ORB_SMALL / 2) - (
-        (OrbView(ORB_BOX)._bar_in + OrbView(ORB_BOX)._bar_len) * DOCK_SCALE)
+    drawn = OrbView(ORB_DRAW, ORB_PAD)
+    orb_bottom = (OPEN_H - MARGIN - ORB_DRAW / 2) - (drawn._bar_in + drawn._bar_len)
     assert TEXT_TOP < orb_bottom, "a full-height message must clear the ring"
     assert TEXT_BOTTOM > MARGIN + INPUT_H, "and sit above the ask box"
 
@@ -472,135 +384,225 @@ def test_message_sits_clear_of_both_the_orb_and_the_ask_box(window):
     assert frame.origin.y + frame.size.height <= TEXT_TOP
 
 
-def test_orb_stays_put_on_screen_across_the_bloom(window):
-    # The choppiness Kai saw: the orb was SNAPPED to its new frame inside a
-    # window that hadn't resized yet, then dragged back in discrete steps as
-    # resize notifications arrived. The window target is chosen so the orb's
-    # SCREEN position is identical open and collapsed — so animating both
-    # frames on one curve holds it still, with nothing to smooth out.
-    from src.menubar.orb import OPEN_H, OPEN_W, ORB_BOX
-
-    def screen_centre():
-        win, hit = window.panel.frame(), window._hit.frame()
-        return (win.origin.x + hit.origin.x + ORB_BOX / 2,
-                win.origin.y + hit.origin.y + ORB_BOX / 2)
-
-    _open_fully(window)
-    before = screen_centre()
-
-    cx, cy = window._orb_center()
-    target = window._clamp(cx - ORB_BOX / 2, cy - ORB_BOX / 2, ORB_BOX, ORB_BOX)
-    collapsed = window._orb_frame(ORB_BOX, ORB_BOX)
-    after = (target.origin.x + collapsed.origin.x + ORB_BOX / 2,
-             target.origin.y + collapsed.origin.y + ORB_BOX / 2)
-
-    assert before[0] == pytest.approx(after[0], abs=1.0)
-    assert before[1] == pytest.approx(after[1], abs=1.0)
-
-
-def test_orb_position_is_continuous_in_window_size(window):
-    # THE snap: with a state branch the orb's in-window spot jumped 155x279 the
-    # instant the flag flipped — southwest collapsing, northeast expanding.
-    # Blending on height means no size produces a jump.
-    from src.menubar.orb import OPEN_H, OPEN_W, ORB_BOX
-
-    heights = list(range(ORB_BOX, int(OPEN_H) + 1, 5))
-    ys = [window._orb_frame(h, h).origin.y for h in heights]
-    steps = [b - a for a, b in zip(ys, ys[1:])]
-    assert all(step >= 0 for step in steps), "must rise monotonically"
-    assert max(steps) < 15, "and in small increments — no discontinuity"
-
-    # endpoints still land exactly where each state wants them
-    assert window._orb_frame(ORB_BOX, ORB_BOX).origin.y == pytest.approx(0.0)
-    assert window._orb_frame(OPEN_W, OPEN_H).origin.y == pytest.approx(
-        OPEN_H - 18 - 176 / 2 - ORB_BOX / 2)
-
-
-def test_spamming_the_orb_does_not_make_it_wander(window):
-    # Kai: "if you spam it, it starts bugging out a little, moving erratically
-    # near the original position". A click landing mid-animation re-measured the
-    # anchor from a window halfway between sizes, so every toggle compounded the
-    # error. The anchor is now computed once from a settled window and held.
-    _open_fully(window)
-    settled = window._orb_center()
-
-    for _ in range(12):  # never let an animation finish
-        (window.collapse if window._open else window.expand)()
-
-    assert window._anchor is not None
-    assert window._anchor[0] == pytest.approx(settled[0], abs=1.0)
-    assert window._anchor[1] == pytest.approx(settled[1], abs=1.0)
-
-
-def test_a_superseded_bloom_cannot_settle_the_current_one(window):
-    # the first animation's completion fires midway through the second; without
-    # a generation token it cleared _animating and let relayout stamp on an
-    # in-flight bloom
-    window._animating = True
-    window._bloom = 7
-
-    window._settle(token=3)
-    assert window._animating is True, "an older transition must not settle this one"
-
-    window._settle(token=7)
-    assert window._animating is False
-    assert window._anchor is None
-
-
-def test_dragging_invalidates_the_cached_anchor(window):
-    _open_fully(window)
-    window._anchor_point()
-    assert window._anchor is not None
-    window._orb_dragged()
-    assert window._anchor is None, "a moved orb needs a fresh anchor"
-
-
-def test_relayout_tracks_the_window_during_the_bloom(window):
-    # The resize stream is what moves the orb, so relayout must NOT be gated on
-    # _animating. Animating the orb's frame instead was tried and restored the
-    # snap: animator().setFrame_() applies immediately for this view rather than
-    # interpolating, landing the orb at its destination before the window moved.
-    _open_fully(window)
-    window._animating = True
-    window._hit.setFrame_(window._orb_frame(999, 999))
-    window.relayout()
-    bounds = window.panel.contentView().bounds()
-    expected = window._orb_frame(bounds.size.width, bounds.size.height)
-    assert window._hit.frame().origin.y == pytest.approx(expected.origin.y)
-
-
-def test_orb_screen_position_is_invariant_through_the_bloom(window):
-    # Kai: "it just looks like it's bouncing like a ball a little". The window's
-    # origin moves LINEARLY as it resizes, so the orb's in-window y must be
-    # linear in height too or the terms don't cancel. Blending against `docked`
-    # (itself height-dependent) made it quadratic → a ~39px parabolic swing out
-    # and back. This traces the actual screen position across the transition.
-    from src.menubar.orb import DOCKED_Y, OPEN_H, ORB_BOX
-
-    positions = []
-    for i in range(41):
-        e = i / 40.0
-        window_y = DOCKED_Y * e                          # origin rises linearly
-        height = OPEN_H - (OPEN_H - ORB_BOX) * e         # …as it shrinks
-        positions.append(
-            window_y + window._orb_frame(height, height).origin.y + ORB_BOX / 2)
-
-    assert max(positions) - min(positions) < 0.5, (
-        f"orb must hold still; swung {max(positions) - min(positions):.1f}px")
-
-
-def test_the_orb_never_changes_size(window):
+def test_the_orb_has_no_scaling_mechanism_at_all(window):
     # Kai: "I'm just seeing the circle expand a slight amount when it shouldn't."
-    # The scale was the last part of the bloom NOT derived from the window — it
-    # ran on its own Core Animation curve, and that independent easing read as
-    # a twitch. One size in both states leaves nothing to animate.
-    from src.menubar.orb import DOCK_SCALE, ORB_BOX, ORB_SMALL
+    # The scale animation was the last part of the transition not derived from
+    # the window, and its independent easing read as a twitch. The orb now has
+    # ONE size — the mechanism is gone, not merely set to 1.0.
+    assert not hasattr(window._orb, "set_scale")
+    assert not hasattr(window._orb, "_scale")
 
-    assert ORB_SMALL == ORB_BOX
-    assert DOCK_SCALE == 1.0
-
-    assert window._orb._scale == 1.0
-    _open_fully(window)
-    assert window._orb._scale == 1.0, "blooming must not resize the orb"
+    group = window._orb._group
+    window.expand()
     window.collapse()
-    assert window._orb._scale == 1.0
+    transform = group.transform()
+    assert transform.m11 == 1.0 and transform.m22 == 1.0, (
+        "the orb's layer must stay unscaled through a full cycle")
+
+
+# -- the two-window architecture: nothing ever resizes ------------------------
+
+
+def test_nothing_ever_resizes(window):
+    # the decisive property after five resize-synchronisation bugs: both
+    # windows keep their size through any number of transitions
+    from src.menubar.orb import OPEN_H, OPEN_W, ORB_BOX
+
+    for _ in range(21):
+        (window.collapse if window._open else window.expand)()
+        assert window.orb_panel.frame().size.width == ORB_BOX
+        assert window.orb_panel.frame().size.height == ORB_BOX
+        assert window.panel.frame().size.width == OPEN_W
+        assert window.panel.frame().size.height == OPEN_H
+
+
+def test_orb_window_is_untouched_by_toggling(window):
+    # away from screen edges the orb's WINDOW never moves at all — the surface
+    # fades in beneath it. (Parked against an edge it is nudged ONCE so the
+    # surface fits; that path is exercised separately below.)
+    from AppKit import NSPoint
+
+    window.orb_panel.setFrameOrigin_(NSPoint(600, 400))
+    before = tuple(window.orb_panel.frame().origin)
+    for _ in range(20):
+        (window.collapse if window._open else window.expand)()
+    assert tuple(window.orb_panel.frame().origin) == before
+
+
+def test_edge_parked_orb_nudges_once_then_stays(window):
+    # default parking is the bottom-right corner, where a 460px surface can't
+    # fit around the orb — the clamp shifts the surface and the orb is moved
+    # onto its docked spot ONCE. After that, toggling must be stable.
+    window.expand()
+    after_first = tuple(window.orb_panel.frame().origin)
+    for _ in range(20):
+        (window.collapse if window._open else window.expand)()
+    assert tuple(window.orb_panel.frame().origin) == after_first
+
+
+def test_surface_opens_with_the_orb_on_its_docked_spot(window):
+    from src.menubar.orb import MARGIN, OPEN_H, OPEN_W, ORB_BOX, ORB_DRAW
+
+    window.expand()
+    surface = window.panel.frame()
+    orb = window.orb_panel.frame()
+    assert orb.origin.x + ORB_BOX / 2 == pytest.approx(
+        surface.origin.x + OPEN_W / 2, abs=1.0)
+    # the docked point is a function of the DRAWN size — the window's padding
+    # (room for the glow to fade) is invisible and must not shift the layout
+    assert orb.origin.y + ORB_BOX / 2 == pytest.approx(
+        surface.origin.y + OPEN_H - MARGIN - ORB_DRAW / 2, abs=1.0)
+    # the SURFACE is the parent: dragging its titlebar carries the orb along
+    assert window.orb_panel.parentWindow() is window.panel
+
+
+def test_stale_fade_completion_cannot_steal_the_surface(window):
+    # collapse fades out and THEN orders the surface out — but a re-expand
+    # during the fade must not have its window yanked away by the older
+    # completion when it finally fires
+    window.expand()
+    window.collapse()
+    stale = window._fade
+    window.expand()
+
+    window._finish_collapse(stale)
+    assert window.orb_panel.parentWindow() is window.panel, "stale must bail"
+
+    window.collapse()
+    window._finish_collapse(window._fade)
+    assert window.orb_panel.parentWindow() is None, "the real completion detaches"
+
+
+def test_orb_is_centred_on_the_same_axis_as_the_text(window):
+    # Kai: "center the circle with the center of the text" — now measured in
+    # SCREEN coordinates across the two windows
+    from src.menubar.orb import ORB_BOX
+
+    window.expand()
+    surface = window.panel.frame()
+    orb = window.orb_panel.frame()
+    orb_cx = orb.origin.x + ORB_BOX / 2
+    box = window._input_box.frame()
+    text = window._transcript.frame()
+    assert orb_cx == pytest.approx(
+        surface.origin.x + box.origin.x + box.size.width / 2, abs=1.0)
+    assert orb_cx == pytest.approx(
+        surface.origin.x + text.origin.x + text.size.width / 2, abs=1.0)
+
+
+def test_stoplights_live_on_the_surface(window):
+    # the parked orb is a borderless window — NO chrome exists there at all
+    # (which also removes the titled window's faint boundary box, item 15).
+    # The stoplights belong to the surface and are simply present on it.
+    from AppKit import (NSWindowStyleMaskBorderless,
+                        NSWindowStyleMaskMiniaturizable, NSWindowStyleMaskTitled)
+
+    assert not (window.orb_panel.styleMask() & NSWindowStyleMaskTitled)
+    for index in (0, 1):  # close, miniaturise
+        assert window.panel.standardWindowButton_(index) is not None
+    assert window.panel.styleMask() & NSWindowStyleMaskMiniaturizable
+
+
+def test_loading_arc_hugs_the_circle_not_the_bars(orb):
+    # Kai: "I want it rotating closer to the circle, it's just too close to the
+    # bars". Geometrically centred READ as crowding the bars — their inner ends
+    # form a hard visual edge while the disc's edge is soft — so the arc is
+    # anchored a fixed clearance off the CORE instead of split down the gap.
+    from src.menubar.orb import ARC_CLEARANCE
+
+    half = orb._progress.lineWidth() / 2.0
+    radius = orb._r0 + ARC_CLEARANCE + half
+    to_circle = (radius - half) - orb._r0
+    to_bars = orb._bar_in - (radius + half)
+
+    assert to_circle == pytest.approx(ARC_CLEARANCE, abs=0.01)
+    assert to_circle < to_bars, "it should sit nearer the circle"
+    assert to_bars > 0, "…while still clearing the ring"
+
+
+def test_loading_is_a_resting_state_not_a_lit_one(orb):
+    # The arc looked pinned to the circle's edge, but the radii were centred:
+    # the cause was the core's GLOW running at active strength (0.7, 28px
+    # radius), which bled past the bars and swallowed the arc, making the
+    # circle read far larger than it is.
+    orb.set_state("loading")
+    loading_glow = orb._core.shadowOpacity()
+    orb.set_state("dormant")
+    assert loading_glow == pytest.approx(orb._core.shadowOpacity()), (
+        "loading should be as calm as dormant")
+
+    orb.set_state("speaking")
+    assert orb._core.shadowOpacity() > loading_glow, "active states stay lit"
+
+
+def test_dragging_the_surface_carries_the_orb(window):
+    # Kai dragged the window away and the orb stayed put — "I ended up with
+    # this crazy looking thing". Child windows follow their PARENT, and the
+    # link was the wrong way round (orb as parent), so moving the surface left
+    # the orb stranded. Reversed: the surface is the parent.
+    from AppKit import NSPoint
+
+    window.expand()
+    before = tuple(window.orb_panel.frame().origin)
+    surface = window.panel.frame()
+    window.panel.setFrameOrigin_(NSPoint(surface.origin.x + 120,
+                                         surface.origin.y + 80))
+    after = tuple(window.orb_panel.frame().origin)
+    assert round(after[0] - before[0]) == 120
+    assert round(after[1] - before[1]) == 80
+
+
+def test_orb_drag_is_only_enabled_when_parked(window):
+    # open, the titlebar is the drag handle and the orb rides along as a child;
+    # dragging the orb itself would separate the two halves again
+    assert window._hit._draggable is True
+    window.expand()
+    assert window._hit._draggable is False
+    window.collapse()
+    window._finish_collapse(window._fade)
+    assert window._hit._draggable is True
+
+
+def test_orb_window_has_room_for_the_glow_and_full_bars(window):
+    # the visible blue SQUARE: a radial glow clipped at rectangular window
+    # bounds is full at the corners and cut at the edges
+    from src.menubar.orb import ORB_BOX
+
+    orb = window._orb
+    half = ORB_BOX / 2
+    assert orb._bar_in + orb._bar_len < half, "bars at full volume must fit"
+    assert orb._r0 + orb._core.shadowRadius() < half, "the glow must fade inside"
+
+
+def test_ask_box_grows_with_the_text_then_stops(window):
+    # Kai typed "Hello" ~17 times and the text ran straight over the pill's
+    # border. It now grows upward from its fixed bottom edge, capped.
+    from src.menubar.orb import INPUT_H, INPUT_MAX_H
+
+    window.expand()
+    assert window._input_box.frame().size.height == INPUT_H
+
+    window._input.setString_(" ".join(["Hello"] * 20))
+    window._grow_input()
+    grown = window._input_box.frame().size.height
+    assert grown > INPUT_H, "it must grow with the text"
+
+    window._input.setString_(" ".join(["Hello"] * 200))
+    window._grow_input()
+    assert window._input_box.frame().size.height == INPUT_MAX_H, "…but stop"
+    assert window._input_scroll.hasVerticalScroller(), "past the cap it scrolls"
+
+    window._submit()
+    assert window._input_box.frame().size.height == INPUT_H, "reset after send"
+
+
+def test_a_growing_ask_box_never_reaches_the_message(window):
+    # the pill climbs from a fixed bottom edge, so the slot above has to yield
+    window.expand()
+    for count in (1, 10, 40, 120, 400):
+        window._input.setString_(" ".join(["Hello"] * count))
+        window._grow_input()
+        pill = window._input_box.frame()
+        text = window._transcript.frame()
+        assert text.origin.y >= pill.origin.y + pill.size.height, (
+            f"overlap at {count} words")

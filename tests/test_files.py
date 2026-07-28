@@ -47,15 +47,18 @@ def test_find_formats_sentence(monkeypatch):
         Path("/Users/kai/Desktop/resume_old.pdf"),
     ])
     out = files.find("resume")
-    assert out == ("Found 2 files: resume.pdf (~/Documents), "
-                   "resume_old.pdf (~/Desktop)")
+    # one file per LINE, name first then location: a comma-run of
+    # "name (path)" was hard to scan and overflowed the orb's message slot
+    assert out == ("Found 2 files:\n"
+                   "resume.pdf  ·  ~/Documents\n"
+                   "resume_old.pdf  ·  ~/Desktop")
 
 
 def test_find_singular_and_none(monkeypatch):
     monkeypatch.setattr(files, "HOME", Path("/Users/kai"))
     monkeypatch.setattr(files, "search",
                         lambda q, n=5: [Path("/Users/kai/Downloads/tax.pdf")])
-    assert files.find("tax").startswith("Found 1 file: tax.pdf")
+    assert files.find("tax").startswith("Found 1 file:\ntax.pdf")
 
     monkeypatch.setattr(files, "search", lambda q, n=5: [])
     assert files.find("nope") == "No files found matching 'nope'"
@@ -126,3 +129,23 @@ def test_walk_fallback_for_recent_files(tmp_path, monkeypatch):
 
     out = files.recent(7)
     assert "today.md" in out
+
+
+def test_deep_paths_collapse_so_the_name_stays_readable(monkeypatch):
+    # a full path like ~/Documents/Side Projects/Desktop_Helper/build/... wraps
+    # over several lines and buries the filename it's meant to locate
+    monkeypatch.setattr(files, "HOME", Path("/Users/kai"))
+    assert files._short_dir(Path("/Users/kai/Documents")) == "~/Documents"
+    assert files._short_dir(Path("/Users/kai/Documents/Work")) == "~/Documents/Work"
+    assert files._short_dir(
+        Path("/Users/kai/Documents/Side Projects/App/src/menubar")) == "…/menubar"
+
+
+def test_build_output_is_not_a_document(monkeypatch):
+    # "recent documents" was dominated by our own PyInstaller output
+    monkeypatch.setattr(files, "HOME", Path("/Users/kai"))
+    for junk in ("Documents/App/build/Desktop Helper/BUNDLE-00.toc",
+                 "Documents/App/dist/DesktopHelper/_internal/version.py",
+                 "Documents/App/build/COLLECT-00.toc"):
+        assert files._is_noise(Path("/Users/kai") / junk), junk
+    assert not files._is_noise(Path("/Users/kai/Documents/resume.pdf"))
