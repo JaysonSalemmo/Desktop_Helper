@@ -96,15 +96,14 @@ class DesktopHelperMenuBar(rumps.App):
         self.menu = [*menu, None, self.status_item]
         self._apply_keybind_labels()
 
-        self._panel = None  # ReplyPanel, created lazily on the main thread
+        self._panel = None  # OrbWindow, created lazily on the main thread
         self._wake = None   # WakeWordListener, created on first enable
         if self.voice_enabled and getattr(self, "wake_enabled", False):
             self._start_wake()
         self._hotkeys = None
         self._start_hotkey()  # before the load thread — _load_model reads _hotkeys
-        if self.config.get("features", {}).get("orb_ui", True):
-            # scheduled, so it runs once the main loop is up
-            self._on_main(self._park_orb)
+        # scheduled, so it runs once the main loop is up
+        self._on_main(self._park_orb)
         threading.Thread(target=self._load_model, daemon=True).start()
         if self.config.get("features", {}).get("startup_briefing", False):
             # briefing needs no model — deliver as a notification while it loads
@@ -175,8 +174,7 @@ class DesktopHelperMenuBar(rumps.App):
         self._on_main(self._set_status, TITLE_READY, self._ready_status)
         # the orb is a presence, not a window — it takes its place on the
         # desktop as soon as there's a model behind it, and breathes there
-        if self.config.get("features", {}).get("orb_ui", True):
-            self._on_main(self._park_orb)
+        self._on_main(self._park_orb)
         if self.transcriber is not None:
             self.transcriber.warm_up()  # download/load whisper off the hot path
 
@@ -377,20 +375,15 @@ class DesktopHelperMenuBar(rumps.App):
 
     def _get_panel(self):
         if self._panel is None:
-            from src.menubar.panel import install_edit_menu
+            from src.menubar.widgets import install_edit_menu
             install_edit_menu()  # ⌘C/⌘A/⌘V in the panel — needs the app fully up
             actions = {}
             if self.voice_enabled:
                 actions["Speak"] = lambda: self._toggle_voice(None)
             actions["Briefing"] = lambda: self._briefing_clicked(None)
-            # the orb is the default front-end; features.orb_ui=false restores
-            # the classic chat panel (same public API, so nothing else changes)
-            if self.config.get("features", {}).get("orb_ui", True):
-                from src.menubar.orb import OrbWindow as Surface
-            else:
-                from src.menubar.panel import ReplyPanel as Surface
-            self._panel = Surface(on_followup=self._followup, actions=actions,
-                                  on_visibility=self._panel_visibility)
+            from src.menubar.orb import OrbWindow
+            self._panel = OrbWindow(on_followup=self._followup, actions=actions,
+                                    on_visibility=self._panel_visibility)
         return self._panel
 
     def _park_orb(self) -> None:
