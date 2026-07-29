@@ -606,3 +606,26 @@ def test_a_growing_ask_box_never_reaches_the_message(window):
         text = window._transcript.frame()
         assert text.origin.y >= pill.origin.y + pill.size.height, (
             f"overlap at {count} words")
+
+
+def test_surface_has_a_contrast_floor_over_any_backdrop(window):
+    # Kai 2026-07-29: the surface was hard to read on a light background.
+    # Behind-window vibrancy samples the DESKTOP, so a pale wallpaper washed it
+    # out. A tint OVER the blur floors the contrast; under it would do nothing,
+    # because the material samples past anything inside the window.
+    from src.menubar.orb import SURFACE_TINT
+
+    window.expand()
+    assert 0.3 < SURFACE_TINT < 0.8, "dark enough to read, light enough to see through"
+    assert list(window._chrome.subviews())[0] is window._tint, (
+        "the tint must sit under the content but over the blur")
+
+
+def test_surface_layers_follow_a_resize(window):
+    from AppKit import NSMakeRect
+
+    window.expand()
+    window.panel.setFrame_display_(NSMakeRect(0, 0, 620, 540), False)
+    assert tuple(window._chrome.frame().size) == (620.0, 540.0)
+    assert tuple(window._tint.frame().size) == (620.0, 540.0), (
+        "a zoomed window must not expose an untinted corner")

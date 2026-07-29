@@ -54,6 +54,8 @@ from AppKit import (
     NSTextField,
     NSTextView,
     NSView,
+    NSViewHeightSizable,
+    NSViewWidthSizable,
     NSVisualEffectView,
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskClosable,
@@ -126,6 +128,9 @@ LEVEL_RELEASE = 0.12     # …and when getting quieter
 BLOOM_S = 0.26                  # bloom / collapse duration — short,
                                 # so any sampling lag is over quickly
 EDGE_GAP = 24                   # default parking distance from the screen edge
+SURFACE_TINT = 0.55             # opacity of the dark wash over the blur —
+                                # enough to read on a white backdrop, without
+                                # losing the translucency Kai liked
 
 BARS = 56                # spokes in the ring (Bensound-style visualiser)
 BAR_FLOOR = 0.52         # bars stay within a narrow band — the ring reads as
@@ -630,7 +635,23 @@ class OrbWindow:
         self._chrome.setBlendingMode_(0)      # behind-window: real translucency
         self._chrome.setMaterial_(15)         # NSVisualEffectMaterialHUDWindow
         self._chrome.setState_(1)             # active
+        # follow the window if it's ever zoomed, so no bare corner shows through
+        self._chrome.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
         content.addSubview_(self._chrome)
+
+        # Behind-window vibrancy samples the DESKTOP, so over a light window or
+        # pale wallpaper the surface washed out and the text lost contrast
+        # (Kai 2026-07-29). A tint laid OVER the blur — under it would change
+        # nothing, since the material samples past anything inside the window —
+        # floors the contrast on any backdrop while keeping the blur's
+        # character. Added before the content, so everything draws above it.
+        self._tint = NSView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, OPEN_W, OPEN_H))
+        self._tint.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        self._tint.setWantsLayer_(True)
+        self._tint.layer().setBackgroundColor_(
+            NSColor.colorWithCalibratedWhite_alpha_(0.09, SURFACE_TINT).CGColor())
+        self._chrome.addSubview_(self._tint)
 
         self._submitter = _Submitter.alloc().initWithCallback_(self._submit)
         self._submitter._actions = {}
