@@ -16,7 +16,7 @@ CONVERSATION MODEL (Kai's pick): ephemeral + history on demand. Only the current
 exchange shows; the ⌄ button expands full scrollback. The transcript is a real
 selectable NSTextView, so ⌘A/⌘C still work (see install_edit_menu).
 
-MOTION RULES (learned the hard way — see presence.py and the DEVLOG)
+MOTION RULES (learned the hard way — see the DEVLOG)
 - Every continuous animation is declarative Core Animation, run by the
   WindowServer on the GPU. Python is NEVER in the frame loop: inference holds
   the GIL, so a timer-driven redraw would stutter exactly during `thinking`.
@@ -29,8 +29,7 @@ MOTION RULES (learned the hard way — see presence.py and the DEVLOG)
   a plain Python class over vanilla NSViews — `set_state_` would publish as
   `set:state:` and fail arity checks.
 
-Public API mirrors ReplyPanel exactly, so the app can swap between them
-(`features.orb_ui`).
+The only front-end; `panel.py` (the classic chat panel) was retired 2026-07-29.
 """
 import math
 
@@ -86,7 +85,7 @@ from Quartz import (
     kCAMediaTimingFunctionLinear,
 )
 
-from src.menubar.panel import _ChatInput, _Submitter, install_edit_menu
+from src.menubar.widgets import ChatInput, Submitter, install_edit_menu
 
 # -- geometry ----------------------------------------------------------------
 # ONE size in both states. The orb used to grow 150 -> 176 on bloom, animated on
@@ -561,7 +560,7 @@ class _OrbHitView(NSView):
 
 
 class OrbWindow:
-    """Drop-in replacement for ReplyPanel. Main thread only."""
+    """The conversation surface. Main thread only."""
 
     def __init__(self, on_followup, actions: dict | None = None,
                  on_visibility=None):
@@ -653,7 +652,7 @@ class OrbWindow:
             NSColor.colorWithCalibratedWhite_alpha_(0.09, SURFACE_TINT).CGColor())
         self._chrome.addSubview_(self._tint)
 
-        self._submitter = _Submitter.alloc().initWithCallback_(self._submit)
+        self._submitter = Submitter.alloc().initWithCallback_(self._submit)
         self._submitter._actions = {}
 
         # the message occupies a FIXED slot — no scrolling text, no bubbles.
@@ -693,7 +692,7 @@ class OrbWindow:
         self._input_scroll.setBorderType_(0)
         self._input_scroll.setDrawsBackground_(False)
         self._input_scroll.contentView().setDrawsBackground_(False)
-        self._input = _ChatInput.alloc().initWithFrame_submit_placeholder_onChange_(
+        self._input = ChatInput.alloc().initWithFrame_submit_placeholder_onChange_(
             NSMakeRect(0, 0, input_w, INPUT_H),
             self._submit, "Ask anything…", self._grow_input)
         self._input.setFont_(NSFont.systemFontOfSize_(13))
@@ -942,7 +941,7 @@ class OrbWindow:
         else:
             self._marker.setStringValue_("")
 
-    # -- ReplyPanel-compatible API ----------------------------------------
+    # -- public API (called from app.py, main thread) ----------------------
 
     def _present_window(self) -> None:
         self.orb_panel.orderFrontRegardless()
@@ -1045,7 +1044,3 @@ class OrbWindow:
         self._grow_input()   # shrink back to one line
         self._on_followup(text)
 
-
-def install_orb_edit_menu() -> None:
-    """⌘A/⌘C in the transcript — same reason as the panel (see panel.py)."""
-    install_edit_menu()
