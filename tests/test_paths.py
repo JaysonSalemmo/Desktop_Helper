@@ -22,6 +22,6 @@ def test_frozen_splits_resource_and_user_data(monkeypatch, tmp_path):
     # resources come from the unpacked bundle
     assert paths.resource_dir() == tmp_path / "bundle"
     # user data goes to Application Support, and the dir is created
-    expected = tmp_path / "home" / "Library" / "Application Support" / "Desktop Helper"
+    expected = tmp_path / "home" / "Library" / "Application Support" / "Buddy"
     assert paths.user_data_dir() == expected
     assert expected.is_dir()

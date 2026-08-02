@@ -25,6 +25,12 @@ IM_END = "<|im_end|>"
 # conversation (its template injects one automatically). we define our own —
 # short (every request pays its token cost) and IDENTICAL between training
 # and inference, which is all that actually matters.
+# ⚠️ Deliberately still says "Desktop Helper" after the 2026-08-02 rename to
+# Buddy. The shipped checkpoint was fine-tuned with this exact string, and this
+# must stay IDENTICAL between training and inference — renaming it here would
+# put every inference out of distribution from training and quietly degrade
+# routing. It changes only as part of a retrain, where the generated data
+# carries the new name too.
 SYSTEM = ("You are Desktop Helper, a personal assistant on the user's Mac. "
           "You can call tools to get live data.")
 

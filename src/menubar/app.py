@@ -32,7 +32,7 @@ from PyObjCTools import AppHelper
 from src.applog import get_logger
 from src.assistant.engine import load_engine
 from src.config import settings
-from src.paths import is_frozen, resource_path
+from src.paths import APP_NAME, is_frozen, resource_path
 
 ICON_PATH = resource_path("assets", "AppIcon.icns")
 
@@ -44,7 +44,7 @@ TITLE_LISTENING = "🎤"
 
 class DesktopHelperMenuBar(rumps.App):
     def __init__(self):
-        super().__init__("Desktop Helper", title=TITLE_LOADING, quit_button="Quit")
+        super().__init__(APP_NAME, title=TITLE_LOADING, quit_button="Quit")
         # our icon on dialogs instead of the Python rocket (the process is
         # python, so NSApp otherwise inherits python's icon)
         if ICON_PATH.exists():
@@ -235,12 +235,12 @@ class DesktopHelperMenuBar(rumps.App):
         if self.busy:
             return
         if self.dispatcher is None:
-            rumps.alert("Desktop Helper", "Still loading the model — one moment.")
+            rumps.alert(APP_NAME, "Still loading the model — one moment.")
             return
 
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
         window = rumps.Window(
-            message="", title="Desktop Helper", default_text="",
+            message="", title=APP_NAME, default_text="",
             ok="Ask", cancel="Cancel", dimensions=(380, 96),  # taller: multi-line asks
         )
         try:
@@ -428,7 +428,7 @@ class DesktopHelperMenuBar(rumps.App):
             try:
                 self.recorder.start()  # first use triggers the mic permission prompt
             except Exception as exc:
-                rumps.alert("Desktop Helper", f"Couldn't open the microphone: {exc}")
+                rumps.alert(APP_NAME, f"Couldn't open the microphone: {exc}")
                 return
             self.title = TITLE_LISTENING
             self._presence("listening")
@@ -512,7 +512,7 @@ class DesktopHelperMenuBar(rumps.App):
 
 def main() -> None:
     log = get_logger()
-    log.info("Desktop Helper starting (frozen=%s)", is_frozen())
+    log.info("Buddy starting (frozen=%s)", is_frozen())
     try:
         DesktopHelperMenuBar().run()
     except Exception:

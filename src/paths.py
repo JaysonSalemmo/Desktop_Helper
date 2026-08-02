@@ -20,7 +20,7 @@ before this module existed — nothing about running from source changes.
 import sys
 from pathlib import Path
 
-APP_NAME = "Desktop Helper"
+APP_NAME = "Buddy"
 
 # src/paths.py → parent is src/, its parent is the repo root
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent

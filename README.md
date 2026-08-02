@@ -1,8 +1,8 @@
-# Desktop Helper
+# Buddy
 
-A local, private macOS assistant powered by a language model we fine-tuned ourselves. It lives in your menu bar, answers in natural language, and calls real system tools — calendar, reminders, notes, weather, news, stocks, Spotify, screen reading, file search, and an app launcher — fetching live data at query time. Everything runs on your Mac; nothing is sent to the cloud.
+**A local, private desktop helper for macOS** — powered by a language model we fine-tuned ourselves. It lives in your menu bar, answers in natural language, and calls real system tools — calendar, reminders, notes, weather, news, stocks, Spotify, screen reading, file search, and an app launcher — fetching live data at query time. Everything runs on your Mac; nothing is sent to the cloud.
 
-![Desktop Helper](assets/demo.gif)
+![Buddy](assets/demo.gif)
 
 *Ask by voice or text; the ring moves with your voice, and answers come from live system data.*
 
@@ -93,10 +93,10 @@ uv run python -m src.menubar     # menu-bar app (primary)
 The model checkpoint (gitignored) goes in `model/checkpoints/`. To build and install the standalone app:
 
 ```bash
-uv run python scripts/freeze_app.py --install    # builds + installs Desktop Helper.app
+uv run python scripts/freeze_app.py --install    # builds + installs Buddy.app
 ```
 
-When frozen, config and the checkpoint live in `~/Library/Application Support/Desktop Helper/`.
+When frozen, config and the checkpoint live in `~/Library/Application Support/Buddy/`.
 
 ## Project Structure
 
