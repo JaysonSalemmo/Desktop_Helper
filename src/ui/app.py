@@ -41,7 +41,7 @@ class DesktopHelperApp(App):
 
     def on_mount(self) -> None:
         name = self.config["user"]["name"]
-        self.title = "Desktop Helper"
+        self.title = "Buddy"
         log = self.query_one("#chat_log", RichLog)
         log.write(f"[bold green]Hello {name}! I'm your desktop assistant.[/bold green]")
         log.write("[dim]Loading model — one moment...[/dim]")

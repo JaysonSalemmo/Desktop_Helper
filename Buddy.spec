@@ -1,10 +1,10 @@
 # PyInstaller spec — freezes the menu bar app into a self-contained
-# "Desktop Helper.app" that needs neither uv nor the project source tree.
+# "Buddy.app" that needs neither uv nor the project source tree.
 #
-#   uv run pyinstaller "Desktop Helper.spec" --noconfirm
+#   uv run pyinstaller Buddy.spec --noconfirm
 #
 # The 3.4GB model checkpoint is deliberately NOT bundled — it stays under
-# ~/Library/Application Support/Desktop Helper/ (see src/paths.py), so the .app
+# ~/Library/Application Support/Buddy/ (see src/paths.py), so the .app
 # stays lean and the weights can be swapped without a rebuild.
 from PyInstaller.utils.hooks import collect_all
 
@@ -43,9 +43,9 @@ excludes = [
 ]
 
 INFO_PLIST = {
-    "CFBundleName": "Desktop Helper",
-    "CFBundleDisplayName": "Desktop Helper",
-    "CFBundleIdentifier": "com.kai.desktop-helper",
+    "CFBundleName": "Buddy",
+    "CFBundleDisplayName": "Buddy",
+    "CFBundleIdentifier": "com.kai.buddy",
     "CFBundleShortVersionString": "0.2.0",
     "CFBundleVersion": "0.2.0",
     "LSMinimumSystemVersion": "13.0",
@@ -54,18 +54,18 @@ INFO_PLIST = {
     # TCC reads these from the responsible app's Info.plist; without them macOS
     # silently refuses to even prompt (the calendar-permission saga)
     "NSCalendarsFullAccessUsageDescription":
-        "Desktop Helper reads today's events to answer questions about your calendar.",
+        "Buddy reads today's events to answer questions about your calendar.",
     "NSCalendarsUsageDescription":
-        "Desktop Helper reads today's events to answer questions about your calendar.",
+        "Buddy reads today's events to answer questions about your calendar.",
     "NSRemindersFullAccessUsageDescription":
-        "Desktop Helper reads your reminders to answer questions about your to-dos.",
+        "Buddy reads your reminders to answer questions about your to-dos.",
     "NSRemindersUsageDescription":
-        "Desktop Helper reads your reminders to answer questions about your to-dos.",
+        "Buddy reads your reminders to answer questions about your to-dos.",
     "NSMicrophoneUsageDescription":
-        "Desktop Helper records while you hold the hotkey so it can transcribe "
+        "Buddy records while you hold the hotkey so it can transcribe "
         "your question locally. Audio never leaves this Mac.",
     "NSAppleEventsUsageDescription":
-        "Desktop Helper controls Spotify and other apps via AppleScript.",
+        "Buddy controls Spotify and other apps via AppleScript.",
 }
 
 a = Analysis(
@@ -85,7 +85,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="DesktopHelper",
+    name="Buddy",
     console=False,          # GUI/menu-bar app — no terminal window
     target_arch="arm64",    # Apple Silicon only (matches the thin launcher)
     codesign_identity=None,  # ad-hoc signed in COLLECT/BUNDLE post-step
@@ -95,12 +95,12 @@ coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
-    name="DesktopHelper",
+    name="Buddy",
 )
 
 app = BUNDLE(
     coll,
-    name="Desktop Helper.app",
+    name="Buddy.app",
     icon="assets/AppIcon.icns",
     bundle_identifier="com.kai.desktop-helper",
     info_plist=INFO_PLIST,

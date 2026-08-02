@@ -1,5 +1,5 @@
 """
-Build the FROZEN "Desktop Helper.app" (self-contained — no uv, no source tree)
+Build the FROZEN "Buddy.app" (self-contained — no uv, no source tree)
 and seed its per-user data so it can actually run.
 
 This supersedes scripts/build_app.py (the old thin launcher that just ran
@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-APP_NAME = "Desktop Helper"
+APP_NAME = "Buddy"
 APP_SUPPORT = Path.home() / "Library" / "Application Support" / APP_NAME
 
 
