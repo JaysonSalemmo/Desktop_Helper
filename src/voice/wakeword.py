@@ -101,6 +101,10 @@ class WakeWordListener(threading.Thread):
             from openwakeword.model import Model
             model = Model(wakeword_models=[self.model_name],
                           inference_framework="onnx")
+            # openwakeword keys predictions by the model's own name, which for a
+            # custom .onnx is its basename — not the path we loaded it from. Ask
+            # the loaded model rather than assuming the key is model_name.
+            key = next(iter(model.models))
             stream = sd.InputStream(samplerate=RATE, channels=1, dtype="int16",
                                     blocksize=FRAME)
             stream.start()
@@ -119,7 +123,7 @@ class WakeWordListener(threading.Thread):
                 if needs_reset:
                     model.reset()
                     needs_reset = False
-                score = model.predict(frame[:, 0])[self.model_name]
+                score = model.predict(frame[:, 0])[key]
                 if score >= self.threshold:
                     model.reset()
                     self.on_wake()
